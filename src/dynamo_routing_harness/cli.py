@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,22 @@ def parser() -> argparse.ArgumentParser:
         "--kubeconfig",
         type=Path,
         default=DEFAULT_KUBECONFIG,
+    )
+    root.add_argument(
+        "--dynamo-source",
+        help="local Git checkout or GitHub location; defaults to DYNAMO_SOURCE",
+    )
+    root.add_argument(
+        "--dynamo-ref",
+        help="branch, tag, or commit for a remote --dynamo-source",
+    )
+    root.add_argument(
+        "--fake-sglang-source",
+        help="local Git checkout or GitHub location; defaults to FAKE_SGLANG_SOURCE",
+    )
+    root.add_argument(
+        "--fake-sglang-ref",
+        help="branch, tag, or commit for a remote --fake-sglang-source",
     )
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("doctor")
@@ -78,11 +95,21 @@ def _sources_json(sources: object) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     kubernetes = Kubernetes(kubeconfig=args.kubeconfig)
+    source_environ = os.environ.copy()
+    overrides = {
+        "DYNAMO_SOURCE": args.dynamo_source,
+        "DYNAMO_REF": args.dynamo_ref,
+        "FAKE_SGLANG_SOURCE": args.fake_sglang_source,
+        "FAKE_SGLANG_REF": args.fake_sglang_ref,
+    }
+    source_environ.update(
+        {name: value for name, value in overrides.items() if value is not None}
+    )
 
     if args.command == "doctor":
         kubernetes.require_apple_silicon()
         kubernetes.require_tools()
-        sources = inspect_sources()
+        sources = inspect_sources(environ=source_environ)
         print(_sources_json(sources))
         return 0
     if args.command == "stop":
@@ -110,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0 if summary["matrix_complete"] else 1
 
-    sources = inspect_sources()
+    sources = inspect_sources(environ=source_environ)
     images = image_names(sources)
     write_source_record(sources, LOCAL_ROOT / "sources.json")
 

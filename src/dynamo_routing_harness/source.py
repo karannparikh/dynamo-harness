@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .command import CommandError, Runner
-from .constants import REPOSITORY_ROOT
+from .constants import LOCAL_ROOT, REPOSITORY_ROOT
 
 
 class SourceValidationError(ValueError):
@@ -22,6 +23,9 @@ class SourceMetadata:
     dirty: bool
     status: tuple[str, ...]
     fingerprint: str
+    requested: str | None = None
+    ref: str | None = None
+    remote_url: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -41,23 +45,103 @@ class SourcePair:
         }
 
 
+@dataclass(frozen=True)
+class SourceSpec:
+    name: str
+    requested: str
+    ref: str | None
+    local_path: Path | None = None
+    remote_url: str | None = None
+
+    @property
+    def is_remote(self) -> bool:
+        return self.remote_url is not None
+
+
 def default_source_path(name: str) -> Path:
     return REPOSITORY_ROOT.parent / name
 
 
-def selected_source_paths(
-    environ: Mapping[str, str] | None = None,
-) -> tuple[Path, Path]:
-    values = os.environ if environ is None else environ
-    dynamo = Path(
-        values.get("DYNAMO_SOURCE", os.fspath(default_source_path("dynamo")))
+_GITHUB_HTTPS = re.compile(
+    r"^(?:https://)?github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+_GITHUB_SSH = re.compile(
+    r"^git@github\.com:(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?$"
+)
+_GITHUB_SHORTHAND = re.compile(
+    r"^(?:github:)?(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+)$"
+)
+
+
+def _github_url(value: str) -> str | None:
+    ssh_match = _GITHUB_SSH.fullmatch(value)
+    if ssh_match:
+        owner = ssh_match.group("owner")
+        repo = ssh_match.group("repo")
+        return f"git@github.com:{owner}/{repo}.git"
+    for pattern in (_GITHUB_HTTPS, _GITHUB_SHORTHAND):
+        match = pattern.fullmatch(value)
+        if match:
+            owner = match.group("owner")
+            repo = match.group("repo")
+            return f"https://github.com/{owner}/{repo}.git"
+    return None
+
+
+def parse_source_spec(
+    name: str,
+    value: str,
+    ref: str | None = None,
+) -> SourceSpec:
+    candidate = Path(value).expanduser()
+    explicit_local = (
+        candidate.exists()
+        or candidate.is_absolute()
+        or value.startswith((".", "~"))
     )
-    fake_sglang = Path(
-        values.get(
-            "FAKE_SGLANG_SOURCE", os.fspath(default_source_path("fake-sglang"))
+    remote_url = None if explicit_local else _github_url(value)
+    if remote_url is not None:
+        return SourceSpec(
+            name=name,
+            requested=value,
+            ref=ref or "HEAD",
+            remote_url=remote_url,
         )
+    if "://" in value or value.startswith("git@"):
+        raise SourceValidationError(
+            f"{name} remote sources must be GitHub locations, got: {value}"
+        )
+    if ref:
+        raise SourceValidationError(
+            f"{name}_REF applies only to remote GitHub sources; "
+            f"local checkout {value} is never mutated"
+        )
+    return SourceSpec(
+        name=name,
+        requested=value,
+        ref=None,
+        local_path=candidate.resolve(),
     )
-    return dynamo.expanduser().resolve(), fake_sglang.expanduser().resolve()
+
+
+def selected_source_specs(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[SourceSpec, SourceSpec]:
+    values = os.environ if environ is None else environ
+    dynamo = parse_source_spec(
+        "DYNAMO",
+        values.get("DYNAMO_SOURCE", os.fspath(default_source_path("dynamo"))),
+        values.get("DYNAMO_REF"),
+    )
+    fake_sglang = parse_source_spec(
+        "FAKE_SGLANG",
+        values.get("FAKE_SGLANG_SOURCE", os.fspath(default_source_path("fake-sglang"))),
+        values.get("FAKE_SGLANG_REF"),
+    )
+    return dynamo, fake_sglang
 
 
 def _git(runner: Runner, path: Path, *args: str) -> str:
@@ -95,7 +179,78 @@ def _fingerprint(runner: Runner, path: Path, head: str, status: str) -> str:
     return digest.hexdigest()
 
 
-def inspect_source(path: Path, runner: Runner | None = None) -> SourceMetadata:
+def materialize_source(
+    spec: SourceSpec,
+    runner: Runner | None = None,
+) -> Path:
+    if spec.local_path is not None:
+        return spec.local_path
+    if spec.remote_url is None or spec.ref is None:
+        raise SourceValidationError(f"invalid source specification: {spec!r}")
+    active_runner = runner or Runner()
+    key = hashlib.sha256(spec.remote_url.encode()).hexdigest()[:12]
+    target = LOCAL_ROOT / "sources" / f"{spec.name.lower()}-{key}"
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            active_runner.run(
+                (
+                    "git",
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    spec.remote_url,
+                    target,
+                )
+            )
+        except CommandError as error:
+            raise SourceValidationError(
+                f"failed to clone {spec.name} from {spec.remote_url}: {error}"
+            ) from error
+    if not (target / ".git").is_dir():
+        raise SourceValidationError(
+            f"remote source cache is not a Git checkout: {target}"
+        )
+    origin = _git(active_runner, target, "remote", "get-url", "origin")
+    if origin.rstrip("/") != spec.remote_url.rstrip("/"):
+        raise SourceValidationError(
+            f"remote source cache {target} has unexpected origin {origin!r}; "
+            f"expected {spec.remote_url!r}"
+        )
+    status = _git(
+        active_runner,
+        target,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+    )
+    if status:
+        raise SourceValidationError(
+            f"remote source cache is dirty and will not be overwritten: {target}"
+        )
+    try:
+        active_runner.run(
+            ("git", "-C", target, "fetch", "--depth=1", "origin", spec.ref)
+        )
+        active_runner.run(
+            ("git", "-C", target, "checkout", "--detach", "FETCH_HEAD")
+        )
+    except CommandError as error:
+        raise SourceValidationError(
+            f"failed to materialize {spec.name} ref {spec.ref!r} "
+            f"from {spec.remote_url}: {error}"
+        ) from error
+    return target.resolve()
+
+
+def inspect_source(
+    path: Path,
+    runner: Runner | None = None,
+    *,
+    requested: str | None = None,
+    ref: str | None = None,
+    remote_url: str | None = None,
+) -> SourceMetadata:
     active_runner = runner or Runner()
     if not path.is_dir():
         raise SourceValidationError(f"source checkout does not exist: {path}")
@@ -117,15 +272,35 @@ def inspect_source(path: Path, runner: Runner | None = None) -> SourceMetadata:
         dirty=bool(status),
         status=status,
         fingerprint=_fingerprint(active_runner, path, head, status_text),
+        requested=requested,
+        ref=ref,
+        remote_url=remote_url,
     )
 
 
-def inspect_sources(runner: Runner | None = None) -> SourcePair:
-    dynamo_path, fake_sglang_path = selected_source_paths()
+def inspect_sources(
+    runner: Runner | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> SourcePair:
     active_runner = runner or Runner()
+    dynamo_spec, fake_sglang_spec = selected_source_specs(environ)
+    dynamo_path = materialize_source(dynamo_spec, active_runner)
+    fake_sglang_path = materialize_source(fake_sglang_spec, active_runner)
     return SourcePair(
-        dynamo=inspect_source(dynamo_path, active_runner),
-        fake_sglang=inspect_source(fake_sglang_path, active_runner),
+        dynamo=inspect_source(
+            dynamo_path,
+            active_runner,
+            requested=dynamo_spec.requested,
+            ref=dynamo_spec.ref,
+            remote_url=dynamo_spec.remote_url,
+        ),
+        fake_sglang=inspect_source(
+            fake_sglang_path,
+            active_runner,
+            requested=fake_sglang_spec.requested,
+            ref=fake_sglang_spec.ref,
+            remote_url=fake_sglang_spec.remote_url,
+        ),
     )
 
 

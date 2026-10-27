@@ -34,9 +34,10 @@ Only the benchmark-required Prometheus and OpenTelemetry Collector resources
 are installed. Worker and collector probes, resource bounds, non-root
 execution, and rollout availability settings remain enabled.
 
-## Local checkout layout
+## Source locations
 
-The defaults assume sibling checkouts, but either source can be anywhere:
+The defaults assume sibling local checkouts, but each source may independently
+be a local Git path or a GitHub repository:
 
 ```text
 workplace/
@@ -50,10 +51,38 @@ export DYNAMO_SOURCE="${DYNAMO_SOURCE:-../dynamo}"
 export FAKE_SGLANG_SOURCE="${FAKE_SGLANG_SOURCE:-../fake-sglang}"
 ```
 
-Both paths must be Git work trees. Every matrix, per-case summary, combined
+Equivalent CLI options are available on every command:
+
+```bash
+./bin/lab \
+  --dynamo-source ../dynamo \
+  --fake-sglang-source ../fake-sglang \
+  doctor
+```
+
+For remote GitHub sources, use an `owner/repository`, HTTPS, or SSH GitHub
+location and optionally select a branch, tag, or commit:
+
+```bash
+./bin/lab \
+  --dynamo-source ai-dynamo/dynamo \
+  --dynamo-ref 701da25292ecca8f64d770cc0b17d389200019a1 \
+  --fake-sglang-source karannparikh/fake-sglang \
+  --fake-sglang-ref 0ff63336fc0d2061f94b325b6ab5949ecae50c57 \
+  up
+```
+
+The environment equivalents are `DYNAMO_REF` and `FAKE_SGLANG_REF`. When a
+remote ref is omitted, `HEAD` is fetched; use an immutable commit for repeatable
+runs. Remote repositories are cloned/fetched with Git into the ignored
+`.local/sources/` cache, checked out detached, and rejected if that cache is
+dirty or points at a different origin. Existing local checkouts are never
+checked out or otherwise mutated.
+
+Local paths must be Git work trees. Every matrix, per-case summary, combined
 summary, and Markdown report records the resolved path, full HEAD commit, and
 dirty boolean. JSON artifacts also retain status entries and a content
-fingerprint.
+fingerprint, requested location, remote URL, and selected ref.
 
 The two source versions must be mutually compatible. This harness does not
 silently replace either checkout with an unrelated `ai-dynamo` package:
@@ -78,7 +107,8 @@ with an explicit error.
 
 - macOS on Apple Silicon
 - Colima, Docker CLI, Kind, kubectl, Helm, Git, and Python 3.11+
-- Compatible local Dynamo and fake-sglang Git checkouts
+- Git access to compatible Dynamo and fake-sglang local checkouts or GitHub
+  repositories
 - Mooncake trace files:
   `conversation_trace.jsonl` and `toolagent_trace.jsonl`
 
