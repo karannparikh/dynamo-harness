@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .constants import (
     DGD_NAME,
+    DYNAMO_VERSION,
     MODEL_NAME,
     MODEL_PATH,
     OBSERVABILITY_NAMESPACE,
@@ -18,6 +19,12 @@ from .source import SourcePair
 
 def _env(name: str, value: str) -> dict[str, str]:
     return {"name": name, "value": value}
+
+
+def _pull_policy(image: str) -> str:
+    """Locally built images are kind-loaded (Never); published images such as
+    the NGC operator/planner are pulled by the nodes (IfNotPresent)."""
+    return "Never" if image.startswith("local/") else "IfNotPresent"
 
 
 def _common_env(service_name: str) -> list[dict[str, object]]:
@@ -100,6 +107,7 @@ def _worker_component(
         "name": role,
         "type": role,
         "replicas": 4,
+        "runtimeVersionOverride": DYNAMO_VERSION,
         "podTemplate": {
             "metadata": {
                 "labels": {
@@ -114,6 +122,8 @@ def _worker_component(
                 "terminationGracePeriodSeconds": 30,
                 "securityContext": {
                     "runAsNonRoot": True,
+                    "runAsUser": 1000,
+                    "runAsGroup": 1000,
                     "seccompProfile": {"type": "RuntimeDefault"},
                 },
                 "volumes": [
@@ -198,12 +208,16 @@ def render_resources(
     routing_mode: str = "kv",
 ) -> list[dict[str, object]]:
     policy = (REPOSITORY_ROOT / "config" / "router-policy.yaml").read_text()
-    policy_sha = hashlib.sha256(policy.encode()).hexdigest()
+    # Kubernetes label values are capped at 63 characters, so a full 64-char
+    # SHA-256 hexdigest is invalid; the first 63 chars are still a stable,
+    # collision-safe change-detection fingerprint.
+    policy_sha = hashlib.sha256(policy.encode()).hexdigest()[:63]
+    router_mode = "power-of-two" if routing_mode == "power-of-two" else "kv"
     frontend_args = [
         "--http-port",
         "8000",
         "--router-mode",
-        routing_mode,
+        router_mode,
         "--active-decode-blocks-threshold",
         "0.85",
         "--router-track-output-blocks",
@@ -212,11 +226,14 @@ def render_resources(
     ]
     if routing_mode == "kv":
         frontend_args.append("--router-kv-events")
+    elif routing_mode == "load-aware":
+        frontend_args.append("--load-aware")
     components: list[dict[str, object]] = [
         {
             "name": "Frontend",
             "type": "frontend",
             "replicas": 1,
+            "runtimeVersionOverride": DYNAMO_VERSION,
             "podTemplate": {
                 "metadata": {
                     "labels": {
@@ -265,13 +282,14 @@ def render_resources(
             "name": "Planner",
             "type": "planner",
             "replicas": 1,
+            "runtimeVersionOverride": DYNAMO_VERSION,
             "podTemplate": {
                 "spec": {
                     "containers": [
                         {
                             "name": "main",
                             "image": planner_image,
-                            "imagePullPolicy": "Never",
+                            "imagePullPolicy": _pull_policy(planner_image),
                             "command": ["python", "-m", "dynamo.planner"],
                             "args": [
                                 "--config",
@@ -351,6 +369,28 @@ def write_json_documents(resources: list[dict[str, object]], output: Path) -> No
     )
 
 
+def render_grafana_dashboard() -> dict[str, object]:
+    path = REPOSITORY_ROOT / "config" / "grafana-dashboard.json"
+    dashboard = json.loads(path.read_text())
+    if dashboard.get("uid") != "dynamo-local-sglang":
+        raise ValueError(f"unexpected Grafana dashboard UID in {path}")
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "grafana-dashboard",
+            "namespace": OBSERVABILITY_NAMESPACE,
+        },
+        "data": {
+            "dynamo-lab.json": json.dumps(
+                dashboard,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        },
+    }
+
+
 def render_operator_values(
     operator_repository: str,
     operator_tag: str,
@@ -361,5 +401,8 @@ def render_operator_values(
     ).read_text()
     rendered = template.replace("__OPERATOR_REPOSITORY__", operator_repository)
     rendered = rendered.replace("__OPERATOR_TAG__", operator_tag)
+    rendered = rendered.replace(
+        "__OPERATOR_PULL_POLICY__", _pull_policy(operator_repository)
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered)

@@ -9,7 +9,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .command import CommandError, Runner
-from .constants import LOCAL_ROOT, REPOSITORY_ROOT
+from .constants import (
+    DYNAMO_VANILLA_REF,
+    DYNAMO_VANILLA_REPO,
+    FAKE_SGLANG_VANILLA_REF,
+    FAKE_SGLANG_VANILLA_REPO,
+    LOCAL_ROOT,
+)
 
 
 class SourceValidationError(ValueError):
@@ -26,6 +32,7 @@ class SourceMetadata:
     requested: str | None = None
     ref: str | None = None
     remote_url: str | None = None
+    prebuilt: bool = False
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -52,14 +59,11 @@ class SourceSpec:
     ref: str | None
     local_path: Path | None = None
     remote_url: str | None = None
+    prebuilt: bool = False
 
     @property
     def is_remote(self) -> bool:
         return self.remote_url is not None
-
-
-def default_source_path(name: str) -> Path:
-    return REPOSITORY_ROOT.parent / name
 
 
 _GITHUB_HTTPS = re.compile(
@@ -131,16 +135,35 @@ def selected_source_specs(
     environ: Mapping[str, str] | None = None,
 ) -> tuple[SourceSpec, SourceSpec]:
     values = os.environ if environ is None else environ
-    dynamo = parse_source_spec(
-        "DYNAMO",
-        values.get("DYNAMO_SOURCE", os.fspath(default_source_path("dynamo"))),
-        values.get("DYNAMO_REF"),
-    )
-    fake_sglang = parse_source_spec(
-        "FAKE_SGLANG",
-        values.get("FAKE_SGLANG_SOURCE", os.fspath(default_source_path("fake-sglang"))),
-        values.get("FAKE_SGLANG_REF"),
-    )
+    dynamo_source = values.get("DYNAMO_SOURCE")
+    if dynamo_source is None:
+        dynamo = SourceSpec(
+            name="DYNAMO",
+            requested=f"{DYNAMO_VANILLA_REPO}@{DYNAMO_VANILLA_REF}",
+            ref=DYNAMO_VANILLA_REF,
+            remote_url=f"https://github.com/{DYNAMO_VANILLA_REPO}.git",
+            prebuilt=True,
+        )
+    else:
+        dynamo = parse_source_spec(
+            "DYNAMO",
+            dynamo_source,
+            values.get("DYNAMO_REF"),
+        )
+    fake_source = values.get("FAKE_SGLANG_SOURCE")
+    if fake_source is None:
+        fake_sglang = SourceSpec(
+            name="FAKE_SGLANG",
+            requested=f"{FAKE_SGLANG_VANILLA_REPO}@{FAKE_SGLANG_VANILLA_REF}",
+            ref=FAKE_SGLANG_VANILLA_REF,
+            remote_url=f"https://github.com/{FAKE_SGLANG_VANILLA_REPO}.git",
+        )
+    else:
+        fake_sglang = parse_source_spec(
+            "FAKE_SGLANG",
+            fake_source,
+            values.get("FAKE_SGLANG_REF"),
+        )
     return dynamo, fake_sglang
 
 
@@ -190,7 +213,8 @@ def materialize_source(
     active_runner = runner or Runner()
     key = hashlib.sha256(spec.remote_url.encode()).hexdigest()[:12]
     target = LOCAL_ROOT / "sources" / f"{spec.name.lower()}-{key}"
-    if not target.exists():
+    freshly_cloned = not target.exists()
+    if freshly_cloned:
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             active_runner.run(
@@ -217,17 +241,20 @@ def materialize_source(
             f"remote source cache {target} has unexpected origin {origin!r}; "
             f"expected {spec.remote_url!r}"
         )
-    status = _git(
-        active_runner,
-        target,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=normal",
-    )
-    if status:
-        raise SourceValidationError(
-            f"remote source cache is dirty and will not be overwritten: {target}"
+    # A fresh `--no-checkout` clone has an empty working tree, so skip the guard
+    # that protects an already-materialized cache from being clobbered.
+    if not freshly_cloned:
+        status = _git(
+            active_runner,
+            target,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
         )
+        if status:
+            raise SourceValidationError(
+                f"remote source cache is dirty and will not be overwritten: {target}"
+            )
     try:
         active_runner.run(
             ("git", "-C", target, "fetch", "--depth=1", "origin", spec.ref)
@@ -250,6 +277,7 @@ def inspect_source(
     requested: str | None = None,
     ref: str | None = None,
     remote_url: str | None = None,
+    prebuilt: bool = False,
 ) -> SourceMetadata:
     active_runner = runner or Runner()
     if not path.is_dir():
@@ -275,6 +303,7 @@ def inspect_source(
         requested=requested,
         ref=ref,
         remote_url=remote_url,
+        prebuilt=prebuilt,
     )
 
 
@@ -293,6 +322,7 @@ def inspect_sources(
             requested=dynamo_spec.requested,
             ref=dynamo_spec.ref,
             remote_url=dynamo_spec.remote_url,
+            prebuilt=dynamo_spec.prebuilt,
         ),
         fake_sglang=inspect_source(
             fake_sglang_path,
@@ -300,6 +330,7 @@ def inspect_sources(
             requested=fake_sglang_spec.requested,
             ref=fake_sglang_spec.ref,
             remote_url=fake_sglang_spec.remote_url,
+            prebuilt=fake_sglang_spec.prebuilt,
         ),
     )
 

@@ -8,6 +8,7 @@ RUN apt-get update \
         clang \
         cmake \
         libclang-dev \
+        libprotobuf-dev \
         patchelf \
         pkg-config \
         protobuf-compiler \
@@ -16,6 +17,11 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Debian ships the well-known *.proto types (google/protobuf/struct.proto, used
+# by the vllm sidecar) in libprotobuf-dev under /usr/include; point prost/tonic
+# at it so from-source Dynamo builds can resolve the imports.
+ENV PROTOC_INCLUDE=/usr/include
 
 RUN python3 -m venv /build-venv \
     && /build-venv/bin/pip install --no-cache-dir \
@@ -49,7 +55,7 @@ RUN cd /src/dynamo/lib/bindings/python \
        fi \
     || { echo "failed to build ai-dynamo-runtime from the selected DYNAMO_SOURCE" >&2; exit 1; }
 
-FROM python:3.10-slim-bookworm AS serving
+FROM python:3.11-slim-bookworm AS serving
 
 ARG DYNAMO_COMMIT
 ARG FAKE_SGLANG_COMMIT
@@ -65,13 +71,18 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/runtime-requirements.txt /tmp/runtime-requirements.txt
+COPY docker/dynamo-base-requirements.txt /tmp/dynamo-base-requirements.txt
 RUN python -m pip install --no-cache-dir pip==25.2 \
     && python -m pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cpu \
-        --requirement /tmp/runtime-requirements.txt
+        --requirement /tmp/runtime-requirements.txt \
+    && python -m pip install --no-cache-dir \
+        --requirement /tmp/dynamo-base-requirements.txt
 
 COPY --from=dynamo-builder /wheels /opt/dynamo/wheels
-RUN python -m pip install --no-cache-dir /opt/dynamo/wheels/ai_dynamo_runtime*.whl /opt/dynamo/wheels/ai_dynamo-*.whl
+RUN python -m pip install --no-cache-dir --no-deps \
+        /opt/dynamo/wheels/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheels/ai_dynamo-*.whl
 
 COPY --from=fake_sglang / /opt/fake-sglang
 RUN test -f /opt/fake-sglang/pyproject.toml \
@@ -88,7 +99,7 @@ RUN mkdir -p /opt/harness \
 RUN useradd --create-home --uid 1000 --shell /bin/bash simulator \
     && chown -R simulator:simulator /opt/harness /opt/fake-sglang
 
-ENV DYNAMO_SGLANG_PATH=/usr/local/lib/python3.10/site-packages/dynamo/sglang \
+ENV DYNAMO_SGLANG_PATH=/usr/local/lib/python3.11/site-packages/dynamo/sglang \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -23,12 +24,36 @@ class AIPerfValidationError(RuntimeError):
     pass
 
 
+def _venv_interpreter() -> str:
+    """Interpreter used to create the AIPerf venv.
+
+    AIPerf requires Python >= 3.10, but the system ``python3`` may be older
+    (macOS ships 3.9). Prefer an explicit newer interpreter on PATH, then an
+    ``uv``-managed one, and only fall back to ``python3``.
+    """
+    for candidate in ("python3.13", "python3.12", "python3.11", "python3.10"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    uv = shutil.which("uv")
+    if uv:
+        result = subprocess.run(
+            (uv, "python", "find", ">=3.10"),
+            capture_output=True,
+            text=True,
+        )
+        path = result.stdout.strip()
+        if result.returncode == 0 and path:
+            return path
+    return "python3"
+
+
 def setup_aiperf(runner: Runner | None = None) -> Path:
     active_runner = runner or Runner()
     venv = LOCAL_ROOT / "aiperf-venv"
     python = venv / "bin" / "python"
     if not python.exists():
-        active_runner.run(("python3", "-m", "venv", venv))
+        active_runner.run((_venv_interpreter(), "-m", "venv", venv))
     active_runner.run(
         (
             python,

@@ -18,6 +18,7 @@ from .kubernetes import Kubernetes, validate_fleet
 from .manifests import render_resources, write_json_documents
 from .report import generate_report
 from .source import inspect_sources, write_source_record
+from .traces import ensure_traces
 
 
 def _default_trace_dir() -> Path:
@@ -119,16 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(kubernetes.status())
         return 0
     if args.command == "benchmark-setup":
-        missing = [
-            args.trace_dir / name
-            for name in ("conversation_trace.jsonl", "toolagent_trace.jsonl")
-            if not (args.trace_dir / name).is_file()
-        ]
-        if missing:
-            raise FileNotFoundError(
-                "place both Mooncake trace files in the trace directory; missing: "
-                + ", ".join(str(path) for path in missing)
-            )
+        ensure_traces(args.trace_dir)
         executable = setup_aiperf()
         print(executable)
         return 0
