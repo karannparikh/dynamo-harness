@@ -1,0 +1,192 @@
+# Dynamo routing harness
+
+Standalone, Apple Silicon CPU-only lab for comparing Dynamo routing policies
+against a **local fake-sglang checkout**. The harness owns orchestration,
+validation, metrics, and reporting; fake-sglang remains the serving engine and
+Dynamo remains the runtime/operator source.
+
+## Scope
+
+Included:
+
+- Local-source builds for the serving runtime and Dynamo operator.
+- The Helm chart from the selected local Dynamo checkout.
+- A dedicated Colima profile and three-node Kind cluster.
+- One frontend, one Planner, four prefill processes with 10 DP ranks each, and
+  four decode processes with 10 DP ranks each.
+- Mooncake Conversation and ToolAgent workloads under KV-aware, load-aware, and
+  PO2C routing (`power-of-two` on the CLI).
+- Direct Prometheus cache-counter baselines and deltas scoped to the fresh
+  prefill pods for each case.
+- Strict AIPerf completion, error, output-row, fleet-identity, readiness, and
+  restart checks.
+- Focused JSON and Markdown reports containing the exact source commits and
+  dirty state.
+
+Excluded:
+
+- fake-sglang engine/model implementation.
+- Dynamo engine/operator implementation.
+- Grafana, Loki, Tempo, dashboards, manual traffic generators, scenario tools,
+  and probe utilities.
+
+Only the benchmark-required Prometheus and OpenTelemetry Collector resources
+are installed. Worker and collector probes, resource bounds, non-root
+execution, and rollout availability settings remain enabled.
+
+## Local checkout layout
+
+The defaults assume sibling checkouts, but either source can be anywhere:
+
+```text
+workplace/
+├── dynamo/
+├── fake-sglang/
+└── dynamo-routing-harness/
+```
+
+```bash
+export DYNAMO_SOURCE="${DYNAMO_SOURCE:-../dynamo}"
+export FAKE_SGLANG_SOURCE="${FAKE_SGLANG_SOURCE:-../fake-sglang}"
+```
+
+Both paths must be Git work trees. Every matrix, per-case summary, combined
+summary, and Markdown report records the resolved path, full HEAD commit, and
+dirty boolean. JSON artifacts also retain status entries and a content
+fingerprint.
+
+The two source versions must be mutually compatible. This harness does not
+silently replace either checkout with an unrelated `ai-dynamo` package:
+
+- `docker/serving.Dockerfile` builds both the pure-Python `ai-dynamo` wheel and
+  `ai-dynamo-runtime` native wheel from `DYNAMO_SOURCE`, then produces separate
+  local-source serving and Planner targets on their compatible Python runtimes.
+- The same image installs `FAKE_SGLANG_SOURCE` editable and validates its fake
+  SGLang marker, Dynamo frontend/worker/Planner entry points, and effective H200
+  profile.
+- The operator image is built from
+  `$DYNAMO_SOURCE/deploy/operator`.
+- The platform chart is copied from
+  `$DYNAMO_SOURCE/deploy/helm/charts/platform` before `helm dependency build`,
+  so the selected source checkout is not modified.
+
+Missing build surfaces, native build failures, incompatible Python
+dependencies, missing entry points, or contract mismatches fail the image build
+with an explicit error.
+
+## Prerequisites
+
+- macOS on Apple Silicon
+- Colima, Docker CLI, Kind, kubectl, Helm, Git, and Python 3.11+
+- Compatible local Dynamo and fake-sglang Git checkouts
+- Mooncake trace files:
+  `conversation_trace.jsonl` and `toolagent_trace.jsonl`
+
+The dedicated Colima profile uses 8 CPUs, 24 GiB RAM, and 100 GiB disk. The Kind
+cluster is named `dynamo-routing`; destructive cluster operations verify the
+`kind-dynamo-routing` context and loopback API endpoint.
+
+The harness follows the enterprise approved-dependency policy. It installs no
+plugins, hooks, MCP integrations, or internet scripts. Container/Python/Helm
+dependencies are declared and versioned in repository files.
+
+## Setup and run
+
+```bash
+./bin/lab doctor
+./bin/lab up
+```
+
+`up` builds local-source images for `linux/arm64`, loads them into Kind,
+installs the selected local Dynamo chart and operator, deploys Prometheus/OTel,
+and validates the graph, fleet, and effective fake-sglang H200 contract.
+
+Place traces in the default directory:
+
+```text
+.local/mooncake-100rps/conversation_trace.jsonl
+.local/mooncake-100rps/toolagent_trace.jsonl
+```
+
+Then create the pinned AIPerf environment and run the six-case matrix:
+
+```bash
+./bin/lab benchmark-setup
+./bin/lab benchmark --output reports/mooncake
+```
+
+The default offered load is 20 RPS. Override it without changing the matrix:
+
+```bash
+./bin/lab benchmark \
+  --request-rate 35 \
+  --trace-dir /path/to/mooncake-traces \
+  --output reports/mooncake-35rps
+```
+
+Other lifecycle commands:
+
+```bash
+./bin/lab rebuild
+./bin/lab deploy --routing-mode power-of-two
+./bin/lab status
+./bin/lab report --output reports/mooncake
+./bin/lab stop
+```
+
+`stop` stops only the dedicated Colima profile.
+
+## Validated contracts
+
+Workers deliberately do **not** pass fake-sglang profile flags. The built image
+instantiates fake-sglang's application configuration and requires these
+inherited H200 defaults:
+
+| Setting | Required effective value |
+|---|---:|
+| KV blocks per rank | 15,509 |
+| Tokens per page | 256 |
+| Token slots per rank | 3,970,304 |
+| Context length | 1,048,576 |
+| KV cache dtype | FP8 E4M3 |
+| Maximum running requests per rank | 32 |
+
+Each case reapplies its routing mode, deletes every graph pod, requires entirely
+new UIDs, exact replica/readiness counts, zero initial restarts, correct model
+and 10-rank DP arguments, a stable 15-second settle, and unchanged UIDs and
+restart counts throughout traffic.
+
+AIPerf must produce the expected number of requests and profiling rows, zero
+request errors, an empty error summary, valid request timestamps, and zero
+output-length mismatches when that field is present. Cache evidence uses direct
+before/after values for both simulated prefix-cache counters across all 40
+current prefill ranks; identity changes, counter resets, incomplete labels, or
+zero query-token deltas fail the case.
+
+## Output
+
+Each run contains:
+
+```text
+matrix.json
+summary.json
+report.md
+<workload>-<routing>/
+├── summary.json
+├── cache-metrics-before.json
+├── cache-metrics-after.json
+└── aiperf/
+```
+
+Generated cluster state, caches, images metadata, benchmark outputs, and Python
+artifacts are ignored by Git.
+
+## Development validation
+
+Unit tests mock Git source checkouts, Kubernetes output, Prometheus responses,
+and AIPerf artifacts. They require neither a real Dynamo checkout nor a real
+fake-sglang checkout:
+
+```bash
+make check
+```
