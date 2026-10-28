@@ -74,11 +74,22 @@ class ManifestTests(unittest.TestCase):
             "power-of-two": ("power-of-two", None),
         }
         for mode, (router_mode, mode_flag) in expected.items():
-            frontend = self._dgd(mode)["spec"]["components"][0]
-            args = frontend["podTemplate"]["spec"]["containers"][0]["args"]
-            self.assertEqual(args[args.index("--router-mode") + 1], router_mode)
-            for flag in ("--router-kv-events", "--load-aware"):
-                self.assertEqual(flag in args, flag == mode_flag)
+            components = self._dgd(mode)["spec"]["components"]
+            for component in components:
+                if component["type"] not in ("frontend", "prefill", "decode"):
+                    continue
+                args = component["podTemplate"]["spec"]["containers"][0]["args"]
+                self.assertEqual(
+                    args[args.index("--router-mode") + 1],
+                    router_mode,
+                    component["type"],
+                )
+                for flag in ("--router-kv-events", "--load-aware"):
+                    self.assertEqual(
+                        flag in args,
+                        flag == mode_flag,
+                        component["type"],
+                    )
 
     def test_grafana_dashboard_configmap_is_rendered(self) -> None:
         configmap = render_grafana_dashboard()

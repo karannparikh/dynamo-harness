@@ -65,6 +65,7 @@ def _worker_component(
     role: str,
     image: str,
     router_policy_sha: str,
+    routing_mode: str,
 ) -> dict[str, object]:
     env: list[dict[str, object]] = _common_env(f"dynamo-{role}")
     env.extend(
@@ -86,9 +87,6 @@ def _worker_component(
         "0.0.0.0",
         "--disaggregation-mode",
         role,
-        "--router-mode",
-        "kv",
-        "--router-kv-events",
         "--disaggregation-bootstrap-port",
         "8998",
         "--dp-size",
@@ -103,6 +101,16 @@ def _worker_component(
         "--router-policy-config",
         "/etc/lab-router/router-policy.yaml",
     ]
+    args.extend(
+        [
+            "--router-mode",
+            "power-of-two" if routing_mode == "power-of-two" else "kv",
+        ]
+    )
+    if routing_mode == "kv":
+        args.append("--router-kv-events")
+    elif routing_mode == "load-aware":
+        args.append("--load-aware")
     return {
         "name": role,
         "type": role,
@@ -305,8 +313,8 @@ def render_resources(
                 }
             },
         },
-        _worker_component("prefill", image, policy_sha),
-        _worker_component("decode", image, policy_sha),
+        _worker_component("prefill", image, policy_sha, routing_mode),
+        _worker_component("decode", image, policy_sha, routing_mode),
     ]
     return [
         {
