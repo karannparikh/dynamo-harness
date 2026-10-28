@@ -25,10 +25,18 @@ class AIPerfTests(unittest.TestCase):
         (root / "profile_export_aiperf.json").write_text(json.dumps(payload))
         rows = [
             {
-                "request_start_ns": index * 1_000_000_000,
-                "first_token_ns": index * 1_000_000_000 + 10_000_000,
-                "request_end_ns": index * 1_000_000_000 + 20_000_000,
-                "error": None,
+                "metadata": {
+                    "request_start_ns": index * 1_000_000_000,
+                    "request_end_ns": index * 1_000_000_000 + 20_000_000,
+                    "was_cancelled": False,
+                    "context_overflow_skip": False,
+                },
+                "metrics": {
+                    "time_to_first_token": {
+                        "value": 10,
+                        "unit": "ms",
+                    }
+                },
             }
             for index in range(count)
         ]

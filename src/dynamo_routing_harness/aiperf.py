@@ -212,12 +212,44 @@ def validate_outputs(
     starts: list[int] = []
     ends: list[int] = []
     for index, row in enumerate(rows):
-        if row.get("error") not in (None, "", {}, []):
-            raise AIPerfValidationError(
-                f"profiling row {index} contains an error: {row['error']!r}"
+        metadata = row.get("metadata")
+        metrics = row.get("metrics")
+        if isinstance(metadata, dict) and isinstance(metrics, dict):
+            if metadata.get("was_cancelled") is True:
+                raise AIPerfValidationError(
+                    f"profiling row {index} was cancelled"
+                )
+            if metadata.get("context_overflow_skip") is True:
+                raise AIPerfValidationError(
+                    f"profiling row {index} was skipped for context overflow"
+                )
+            start_value = metadata.get("request_start_ns")
+            end_value = metadata.get("request_end_ns")
+            ttft_metric = metrics.get("time_to_first_token")
+            if not isinstance(ttft_metric, dict):
+                raise AIPerfValidationError(
+                    f"profiling row {index} is missing time_to_first_token"
+                )
+            ttft_value = ttft_metric.get("value")
+        else:
+            if row.get("error") not in (None, "", {}, []):
+                raise AIPerfValidationError(
+                    f"profiling row {index} contains an error: {row['error']!r}"
+                )
+            start_value = row.get("request_start_ns")
+            end_value = row.get("request_end_ns")
+            first_token = row.get("first_token_ns")
+            ttft_value = (
+                (int(first_token) - int(start_value)) / 1_000_000
+                if first_token is not None and start_value is not None
+                else None
             )
-        start = int(row["request_start_ns"])
-        end = int(row["request_end_ns"])
+        if start_value is None or end_value is None:
+            raise AIPerfValidationError(
+                f"profiling row {index} is missing request timestamps"
+            )
+        start = int(start_value)
+        end = int(end_value)
         if end < start:
             raise AIPerfValidationError(
                 f"profiling row {index} ends before it starts"
@@ -225,9 +257,8 @@ def validate_outputs(
         starts.append(start)
         ends.append(end)
         latency_ms.append((end - start) / 1_000_000)
-        first_token = row.get("first_token_ns")
-        if first_token is not None:
-            ttft_ms.append((int(first_token) - start) / 1_000_000)
+        if ttft_value is not None:
+            ttft_ms.append(float(ttft_value))
     dispatch_window = (
         (max(starts) - min(starts)) / 1_000_000_000 if len(starts) > 1 else 0.0
     )

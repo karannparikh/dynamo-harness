@@ -106,113 +106,119 @@ def run_matrix(
     previous_uids: set[str] = set()
     failures: list[str] = []
 
-    with PortForward(
-        kubernetes.kubeconfig,
-        "observability",
-        "service/prometheus",
-        "9090:9090",
-    ):
-        for workload in WORKLOADS:
-            for routing_mode in ROUTING_MODES:
-                current_case = case_name(workload, routing_mode)
-                case_dir = output / current_case
-                case_dir.mkdir(parents=True, exist_ok=True)
-                summary = _case_base(
-                    current_case,
-                    workload,
-                    routing_mode,
-                    request_rate,
+    for workload in WORKLOADS:
+        for routing_mode in ROUTING_MODES:
+            current_case = case_name(workload, routing_mode)
+            case_dir = output / current_case
+            case_dir.mkdir(parents=True, exist_ok=True)
+            summary = _case_base(
+                current_case,
+                workload,
+                routing_mode,
+                request_rate,
+                sources,
+            )
+            try:
+                kubernetes.deploy_graph(
+                    images.serving,
+                    images.planner,
                     sources,
+                    routing_mode,
                 )
-                try:
-                    kubernetes.deploy_graph(
-                        images.serving,
-                        images.planner,
-                        sources,
-                        routing_mode,
+                kubernetes.wait_graph()
+                current = kubernetes.fleet()
+                previous_uids.update(current.uids)
+                fresh = kubernetes.recreate_fleet(previous_uids)
+                previous_uids.update(fresh.uids)
+                time.sleep(SETTLE_SECONDS)
+                baseline = kubernetes.fleet()
+                validate_fleet(baseline)
+                if not baseline.stable_against(fresh):
+                    raise BenchmarkFailed(
+                        "fleet changed during the mandatory 15-second settle"
                     )
-                    kubernetes.wait_graph()
-                    current = kubernetes.fleet()
-                    previous_uids.update(current.uids)
-                    fresh = kubernetes.recreate_fleet(previous_uids)
-                    previous_uids.update(fresh.uids)
-                    time.sleep(SETTLE_SECONDS)
-                    baseline = kubernetes.fleet()
-                    validate_fleet(baseline)
-                    if not baseline.stable_against(fresh):
-                        raise BenchmarkFailed(
-                            "fleet changed during the mandatory 15-second settle"
-                        )
-                    contract = kubernetes.validate_profile_contract(baseline)
+                contract = kubernetes.validate_profile_contract(baseline)
+                with PortForward(
+                    kubernetes.kubeconfig,
+                    "observability",
+                    "service/prometheus",
+                    "9090:9090",
+                ):
                     before = wait_cache_snapshot(
                         "http://127.0.0.1:9090",
                         baseline,
                     )
-                    write_cache_snapshot(
-                        before,
-                        case_dir / "cache-metrics-before.json",
+                write_cache_snapshot(
+                    before,
+                    case_dir / "cache-metrics-before.json",
+                )
+                aiperf_summary, observations = run_aiperf(
+                    kubernetes,
+                    baseline,
+                    aiperf,
+                    traces[workload],
+                    case_dir / "aiperf",
+                    request_rate,
+                )
+                final = kubernetes.fleet()
+                validate_fleet(final)
+                fleet_stable = final.stable_against(baseline) and all(
+                    observation["stable"] for observation in observations
+                )
+                if not fleet_stable:
+                    raise BenchmarkFailed(
+                        "fleet changed after traffic completed"
                     )
-                    aiperf_summary, observations = run_aiperf(
-                        kubernetes,
-                        baseline,
-                        aiperf,
-                        traces[workload],
-                        case_dir / "aiperf",
-                        request_rate,
-                    )
-                    final = kubernetes.fleet()
-                    validate_fleet(final)
-                    fleet_stable = final.stable_against(baseline) and all(
-                        observation["stable"] for observation in observations
-                    )
-                    if not fleet_stable:
-                        raise BenchmarkFailed(
-                            "fleet changed after traffic completed"
-                        )
+                with PortForward(
+                    kubernetes.kubeconfig,
+                    "observability",
+                    "service/prometheus",
+                    "9090:9090",
+                ):
                     after = wait_cache_snapshot(
                         "http://127.0.0.1:9090",
                         final,
                     )
-                    write_cache_snapshot(
-                        after,
-                        case_dir / "cache-metrics-after.json",
-                    )
-                    summary.update(aiperf_summary)
-                    summary.update(
-                        {
-                            "fleet_stable": True,
-                            "fleet": {
-                                "baseline": baseline.as_dict(),
-                                "final": final.as_dict(),
-                                "observations": observations,
-                            },
-                            "effective_profile_contract": contract,
-                            "prefill_cache": cache_delta(
-                                before,
-                                after,
-                                fleet_stable=True,
-                            ),
-                        }
-                    )
-                except Exception as error:
-                    failures.append(f"{current_case}: {error}")
-                    summary.update(
-                        {
-                            "is_complete": False,
-                            "strict_completion": False,
-                            "fleet_stable": False,
-                            "successful": 0,
-                            "errors": {
-                                "harness": {
-                                    "type": type(error).__name__,
-                                    "message": str(error),
-                                }
-                            },
-                            "error_summary": str(error),
-                            "traceback": traceback.format_exc(),
-                        }
-                    )
-                _write_json(case_dir / "summary.json", summary)
+                write_cache_snapshot(
+                    after,
+                    case_dir / "cache-metrics-after.json",
+                )
+                summary.update(aiperf_summary)
+                summary.update(
+                    {
+                        "fleet_stable": True,
+                        "fleet": {
+                            "baseline": baseline.as_dict(),
+                            "final": final.as_dict(),
+                            "observations": observations,
+                        },
+                        "effective_profile_contract": contract,
+                        "prefill_cache": cache_delta(
+                            before,
+                            after,
+                            fleet_stable=True,
+                        )
+                    }
+                )
+            except Exception as error:
+                failures.append(f"{current_case}: {error}")
+                summary.update(
+                    {
+                        "is_complete": False,
+                        "strict_completion": False,
+                        "fleet_stable": False,
+                        "successful": 0,
+                        "errors": {
+                            "harness": {
+                                "type": type(error).__name__,
+                                "message": str(error),
+                            }
+                        },
+                        "error_summary": str(error),
+                        "traceback": traceback.format_exc(),
+                    }
+                )
+            _write_json(case_dir / "summary.json", summary)
 
     matrix["cases_finished"] = True
     matrix["comparison_complete"] = not failures
