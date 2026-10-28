@@ -47,6 +47,14 @@ def _prometheus_query(url: str, query: str) -> list[dict[str, object]]:
     return payload.get("data", {}).get("result", [])
 
 
+def _promql_regex_string(values: list[str]) -> str:
+    pattern = "|".join(
+        re.escape(value).replace(r"\-", "-")
+        for value in values
+    )
+    return pattern.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def read_cache_snapshot(
     prometheus_url: str,
     fleet: FleetSnapshot,
@@ -54,7 +62,7 @@ def read_cache_snapshot(
     pods = sorted(pod.name for pod in fleet.by_role("prefill"))
     if not pods:
         raise MetricValidationError("no prefill pods are present")
-    pod_pattern = "|".join(re.escape(name) for name in pods)
+    pod_pattern = _promql_regex_string(pods)
     query = (
         '{__name__=~"sglang:simulated_prefix_cache_(query|hit)_tokens_total",'
         f'pod=~"{pod_pattern}"'
