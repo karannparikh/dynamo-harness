@@ -5,7 +5,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .aiperf import run_aiperf
+from .aiperf import AIPerfValidationError, run_aiperf
 from .build import Images
 from .constants import (
     DEFAULT_REQUEST_RATE,
@@ -202,18 +202,26 @@ def run_matrix(
                 )
             except Exception as error:
                 failures.append(f"{current_case}: {error}")
+                partial = (
+                    error.summary
+                    if isinstance(error, AIPerfValidationError)
+                    else None
+                )
+                if partial is not None:
+                    summary.update(partial)
+                errors = dict(summary.get("errors", {}))
+                errors["harness"] = {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                }
                 summary.update(
                     {
                         "is_complete": False,
                         "strict_completion": False,
                         "fleet_stable": False,
-                        "successful": 0,
-                        "errors": {
-                            "harness": {
-                                "type": type(error).__name__,
-                                "message": str(error),
-                            }
-                        },
+                        "successful": summary.get("successful", 0),
+                        "errors": errors,
+                        "aiperf_error_summary": summary.get("error_summary"),
                         "error_summary": str(error),
                         "traceback": traceback.format_exc(),
                     }
