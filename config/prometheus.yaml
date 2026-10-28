@@ -23,8 +23,6 @@ data:
       - name: dynamo-1.5-dashboard-compatibility
         interval: 5s
         rules:
-          - record: dynamo_frontend_requests_total
-            expr: dynamo_component_router_requests_total
           - record: dynamo_frontend_output_tokens_total
             expr: dynamo_component_router_output_sequence_tokens_sum
           - record: dynamo_frontend_output_sequence_tokens_sum

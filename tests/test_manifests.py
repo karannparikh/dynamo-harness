@@ -103,7 +103,6 @@ class ManifestTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "config" / "prometheus.yaml"
         ).read_text()
         for metric in (
-            "dynamo_frontend_requests_total",
             "dynamo_frontend_output_tokens_total",
             "dynamo_frontend_time_to_first_token_seconds_bucket",
             "dynamo_frontend_inter_token_latency_seconds_bucket",
@@ -111,6 +110,7 @@ class ManifestTests(unittest.TestCase):
             "dynamo_frontend_queued_requests",
         ):
             self.assertIn(f"record: {metric}", config)
+        self.assertNotIn("record: dynamo_frontend_requests_total", config)
 
     def test_source_commits_are_annotated(self) -> None:
         annotations = self._dgd()["metadata"]["annotations"]
