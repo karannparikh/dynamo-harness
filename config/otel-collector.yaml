@@ -124,14 +124,15 @@ data:
     processors:
       memory_limiter:
         check_interval: 1s
-        limit_mib: 768
-        spike_limit_mib: 192
+        limit_mib: 1536
+        spike_limit_mib: 384
       batch:
         timeout: 1s
     exporters:
       prometheus:
         endpoint: 0.0.0.0:8889
         add_metric_suffixes: false
+        metric_expiration: 5m
         resource_to_telemetry_conversion:
           enabled: true
       otlp/tempo:
@@ -210,8 +211,8 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/otel}
           resources:
-            requests: {cpu: 100m, memory: 512Mi}
-            limits: {cpu: "1", memory: 1Gi}
+            requests: {cpu: 100m, memory: 1Gi}
+            limits: {cpu: "1", memory: 2Gi}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}

@@ -112,6 +112,14 @@ class ManifestTests(unittest.TestCase):
             self.assertIn(f"record: {metric}", config)
         self.assertNotIn("record: dynamo_frontend_requests_total", config)
 
+    def test_otel_collector_bounds_churned_metric_memory(self) -> None:
+        config = (
+            Path(__file__).resolve().parents[1] / "config" / "otel-collector.yaml"
+        ).read_text()
+        self.assertIn("limit_mib: 1536", config)
+        self.assertIn("metric_expiration: 5m", config)
+        self.assertIn('limits: {cpu: "1", memory: 2Gi}', config)
+
     def test_source_commits_are_annotated(self) -> None:
         annotations = self._dgd()["metadata"]["annotations"]
         self.assertEqual(annotations["dynamo-sim.local/dynamo-commit"], "d" * 40)
