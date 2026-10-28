@@ -9,13 +9,21 @@ Dynamo remains the runtime/operator source.
 
 Included:
 
-- Local-source builds for the serving runtime and Dynamo operator.
-- The Helm chart from the selected local Dynamo checkout.
+- Prebuilt vanilla Dynamo by default: the published `ai-dynamo` wheel for the
+  serving runtime plus the NGC operator and Planner images. Only the local
+  fake-sglang checkout is built from source. Setting `DYNAMO_SOURCE` switches
+  the serving runtime to a from-source build (requires a Rust toolchain image);
+  the matching release's NGC operator and Planner images remain prebuilt.
+- The Helm chart from the pinned vanilla Dynamo release (or the local checkout
+  when `DYNAMO_SOURCE` is set).
 - A dedicated Colima profile and three-node Kind cluster.
 - One frontend, one Planner, four prefill processes with 10 DP ranks each, and
   four decode processes with 10 DP ranks each.
 - Mooncake Conversation and ToolAgent workloads under KV-aware, load-aware, and
   PO2C routing (`power-of-two` on the CLI).
+- The exact 53-panel `dynamo-sim` Grafana dashboard, including the predicted
+  versus observed cache-hit ratio, the complete live metric catalog, raw-series
+  exploration, worker/router/Planner views, and infrastructure telemetry.
 - Direct Prometheus cache-counter baselines and deltas scoped to the fresh
   prefill pods for each case.
 - Strict AIPerf completion, error, output-row, fleet-identity, readiness, and
@@ -27,28 +35,37 @@ Excluded:
 
 - fake-sglang engine/model implementation.
 - Dynamo engine/operator implementation.
-- Grafana, Loki, Tempo, dashboards, manual traffic generators, scenario tools,
-  and probe utilities.
+- Manual traffic generators, scenario tools, and probe utilities.
 
-Only the benchmark-required Prometheus and OpenTelemetry Collector resources
-are installed. Worker and collector probes, resource bounds, non-root
-execution, and rollout availability settings remain enabled.
+The observability path matches the earlier lab: the OpenTelemetry Collector
+scrapes Dynamo, fake-sglang, the operator, etcd, NATS, Grafana, Tempo, and Loki,
+then exports the combined catalog to Prometheus. Grafana provisions the exact
+earlier dashboard plus Prometheus, Tempo, and Loki datasources. Worker and
+collector probes, resource bounds, non-root execution, and rollout availability
+settings remain enabled. Prometheus recording rules alias semantically equivalent
+Dynamo 1.6 router metrics to the Dynamo 1.5 frontend names used by the unchanged
+dashboard; panels without a genuine 1.6 equivalent remain empty rather than
+displaying fabricated values.
 
 ## Source locations
 
-The defaults assume sibling local checkouts, but each source may independently
-be a local Git path or a GitHub repository:
+By default Dynamo is the pinned vanilla release (`ai-dynamo` wheel + NGC
+operator/planner images); only fake-sglang is a local checkout. Set
+`DYNAMO_SOURCE` to build Dynamo from a local Git path or GitHub repository
+instead:
 
 ```text
 workplace/
-├── dynamo/
+├── dynamo/        # optional: only when building Dynamo from source
 ├── fake-sglang/
 └── dynamo-routing-harness/
 ```
 
 ```bash
-export DYNAMO_SOURCE="${DYNAMO_SOURCE:-../dynamo}"
+# Dynamo defaults to the prebuilt vanilla release; leave DYNAMO_SOURCE unset.
 export FAKE_SGLANG_SOURCE="${FAKE_SGLANG_SOURCE:-../fake-sglang}"
+# Opt into a from-source Dynamo build:
+# export DYNAMO_SOURCE="../dynamo"
 ```
 
 Equivalent CLI options are available on every command:
@@ -87,14 +104,16 @@ fingerprint, requested location, remote URL, and selected ref.
 The two source versions must be mutually compatible. This harness does not
 silently replace either checkout with an unrelated `ai-dynamo` package:
 
-- `docker/serving.Dockerfile` builds both the pure-Python `ai-dynamo` wheel and
-  `ai-dynamo-runtime` native wheel from `DYNAMO_SOURCE`, then produces separate
-  local-source serving and Planner targets on their compatible Python runtimes.
-- The same image installs `FAKE_SGLANG_SOURCE` editable and validates its fake
-  SGLang marker, Dynamo frontend/worker/Planner entry points, and effective H200
-  profile.
-- The operator image is built from
-  `$DYNAMO_SOURCE/deploy/operator`.
+- By default `docker/serving-prebuilt.Dockerfile` installs the pinned vanilla
+  `ai-dynamo` wheel and layers `FAKE_SGLANG_SOURCE` editable on top; the
+  operator and Planner come from the published NGC images at the same version.
+- When `DYNAMO_SOURCE` is set, `docker/serving.Dockerfile` instead builds both
+  the pure-Python `ai-dynamo` wheel and `ai-dynamo-runtime` native wheel from
+  that source. The operator and Planner remain the published NGC 1.6.0 images,
+  matching the selected source branch used by this lab.
+- Either way the serving image installs `FAKE_SGLANG_SOURCE` editable and
+  validates its fake SGLang marker, Dynamo frontend/worker/Planner entry points,
+  and effective H200 profile.
 - The platform chart is copied from
   `$DYNAMO_SOURCE/deploy/helm/charts/platform` before `helm dependency build`,
   so the selected source checkout is not modified.
@@ -109,8 +128,12 @@ with an explicit error.
 - Colima, Docker CLI, Kind, kubectl, Helm, Git, and Python 3.11+
 - Git access to compatible Dynamo and fake-sglang local checkouts or GitHub
   repositories
-- Mooncake trace files:
-  `conversation_trace.jsonl` and `toolagent_trace.jsonl`
+
+The Mooncake Conversation and ToolAgent (agent multi-turn) traces
+(`conversation_trace.jsonl` and `toolagent_trace.jsonl`) are the pinned
+kvcache-ai/Mooncake FAST'25 traces. `benchmark-setup` downloads and checksum-
+verifies them on demand into the git-ignored trace directory when they are
+missing, so they are never checked into the repository.
 
 The dedicated Colima profile uses 8 CPUs, 24 GiB RAM, and 100 GiB disk. The Kind
 cluster is named `dynamo-routing`; destructive cluster operations verify the
@@ -128,24 +151,27 @@ dependencies are declared and versioned in repository files.
 ```
 
 `up` builds local-source images for `linux/arm64`, loads them into Kind,
-installs the selected local Dynamo chart and operator, deploys Prometheus/OTel,
-and validates the graph, fleet, and effective fake-sglang H200 contract.
+installs the selected local Dynamo chart and operator, deploys the complete
+Prometheus/OTel/Grafana/Tempo/Loki/NATS-exporter stack, and validates the graph,
+fleet, and effective fake-sglang H200 contract.
 
-Place traces in the default directory:
+The live dashboard is available without a login at:
 
 ```text
-.local/mooncake-100rps/conversation_trace.jsonl
-.local/mooncake-100rps/toolagent_trace.jsonl
+http://127.0.0.1:3000/d/dynamo-local-sglang
 ```
 
-Then create the pinned AIPerf environment and run the six-case matrix:
+Create the pinned AIPerf environment and run the six-case matrix.
+`benchmark-setup` downloads the pinned Mooncake traces into the default trace
+directory (`.local/mooncake-100rps/`) when they are missing:
 
 ```bash
 ./bin/lab benchmark-setup
 ./bin/lab benchmark --output reports/mooncake
 ```
 
-The default offered load is 20 RPS. Override it without changing the matrix:
+The default offered load is 20 RPS. Override the rate or point at a different
+trace directory without changing the matrix:
 
 ```bash
 ./bin/lab benchmark \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -20,7 +21,37 @@ from .kubernetes import FleetSnapshot, Kubernetes, validate_fleet
 
 
 class AIPerfValidationError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        summary: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.summary = summary
+
+
+def _venv_interpreter() -> str:
+    """Interpreter used to create the AIPerf venv.
+
+    AIPerf requires Python >= 3.10, but the system ``python3`` may be older
+    (macOS ships 3.9). Prefer an explicit newer interpreter on PATH, then an
+    ``uv``-managed one, and only fall back to ``python3``.
+    """
+    for candidate in ("python3.13", "python3.12", "python3.11", "python3.10"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    uv = shutil.which("uv")
+    if uv:
+        result = subprocess.run(
+            (uv, "python", "find", ">=3.10"),
+            capture_output=True,
+            text=True,
+        )
+        path = result.stdout.strip()
+        if result.returncode == 0 and path:
+            return path
+    return "python3"
 
 
 def setup_aiperf(runner: Runner | None = None) -> Path:
@@ -28,7 +59,7 @@ def setup_aiperf(runner: Runner | None = None) -> Path:
     venv = LOCAL_ROOT / "aiperf-venv"
     python = venv / "bin" / "python"
     if not python.exists():
-        active_runner.run(("python3", "-m", "venv", venv))
+        active_runner.run((_venv_interpreter(), "-m", "venv", venv))
     active_runner.run(
         (
             python,
@@ -156,67 +187,84 @@ def validate_outputs(
     completed = _metric_avg(payload, "completed_request_count")
     requested = _metric_avg(payload, "request_count")
     error_rate = _metric_avg(payload, "request_error_rate")
-    if payload.get("is_complete") is not True:
-        raise AIPerfValidationError("AIPerf marked the profile incomplete")
-    if completed != expected or requested != expected:
-        raise AIPerfValidationError(
-            f"AIPerf completion mismatch: expected={expected}, "
-            f"completed={completed}, requested={requested}"
-        )
-    if error_rate != 0:
-        raise AIPerfValidationError(f"AIPerf request_error_rate={error_rate}")
-    if payload.get("error_summary") not in (None, {}, [], ""):
-        raise AIPerfValidationError(
-            f"AIPerf error_summary is non-empty: {payload['error_summary']!r}"
-        )
-    if "osl_mismatch_count" in payload:
-        if _metric_avg(payload, "osl_mismatch_count") != 0:
-            raise AIPerfValidationError("AIPerf reported output-length mismatches")
 
     rows = [
         json.loads(line)
         for line in rows_path.read_text().splitlines()
         if line.strip()
     ]
-    if len(rows) != expected:
-        raise AIPerfValidationError(
-            f"expected {expected} profiling rows, observed {len(rows)}"
-        )
     latency_ms: list[float] = []
     ttft_ms: list[float] = []
     starts: list[int] = []
     ends: list[int] = []
+    successful_rows = 0
     for index, row in enumerate(rows):
-        if row.get("error") not in (None, "", {}, []):
-            raise AIPerfValidationError(
-                f"profiling row {index} contains an error: {row['error']!r}"
+        metadata = row.get("metadata")
+        metrics = row.get("metrics")
+        if isinstance(metadata, dict) and isinstance(metrics, dict):
+            start_value = metadata.get("request_start_ns")
+            end_value = metadata.get("request_end_ns")
+            row_failed = (
+                row.get("error") not in (None, "", {}, [])
+                or metadata.get("was_cancelled") is True
+                or metadata.get("context_overflow_skip") is True
             )
-        start = int(row["request_start_ns"])
-        end = int(row["request_end_ns"])
+            ttft_metric = metrics.get("time_to_first_token")
+            ttft_value = (
+                ttft_metric.get("value")
+                if isinstance(ttft_metric, dict)
+                else None
+            )
+        else:
+            row_failed = row.get("error") not in (None, "", {}, [])
+            start_value = row.get("request_start_ns")
+            end_value = row.get("request_end_ns")
+            first_token = row.get("first_token_ns")
+            ttft_value = (
+                (int(first_token) - int(start_value)) / 1_000_000
+                if first_token is not None and start_value is not None
+                else None
+            )
+        if start_value is None or end_value is None:
+            raise AIPerfValidationError(
+                f"profiling row {index} is missing request timestamps"
+            )
+        start = int(start_value)
+        end = int(end_value)
         if end < start:
             raise AIPerfValidationError(
                 f"profiling row {index} ends before it starts"
             )
         starts.append(start)
         ends.append(end)
-        latency_ms.append((end - start) / 1_000_000)
-        first_token = row.get("first_token_ns")
-        if first_token is not None:
-            ttft_ms.append((int(first_token) - start) / 1_000_000)
+        if not row_failed:
+            if ttft_value is None:
+                raise AIPerfValidationError(
+                    f"profiling row {index} is missing time_to_first_token"
+                )
+            successful_rows += 1
+            latency_ms.append((end - start) / 1_000_000)
+            ttft_ms.append(float(ttft_value))
     dispatch_window = (
         (max(starts) - min(starts)) / 1_000_000_000 if len(starts) > 1 else 0.0
     )
-    request_window = (max(ends) - min(starts)) / 1_000_000_000
-    return {
+    request_window = (
+        (max(ends) - min(starts)) / 1_000_000_000 if starts else 0.0
+    )
+    error_summary = payload.get("error_summary")
+    summary: dict[str, object] = {
         "expected": expected,
         "recorded": len(rows),
         "completed": int(completed),
-        "successful": len(rows),
-        "error_rate_pct": error_rate * 100,
-        "errors": {},
-        "error_summary": payload.get("error_summary"),
-        "is_complete": True,
-        "strict_completion": True,
+        "successful": int(requested),
+        "failed": int(completed - requested),
+        "error_rate_pct": error_rate,
+        "errors": {} if error_summary in (None, {}, [], "") else {
+            "aiperf": error_summary
+        },
+        "error_summary": error_summary,
+        "is_complete": False,
+        "strict_completion": False,
         "dispatch_window_seconds": dispatch_window,
         "dispatch_rps": len(rows) / dispatch_window if dispatch_window > 0 else None,
         "request_window_seconds": request_window,
@@ -224,6 +272,35 @@ def validate_outputs(
         "ttft_ms_successful": _percentiles(ttft_ms),
         "aiperf_summary": payload,
     }
+
+    def fail(message: str) -> None:
+        raise AIPerfValidationError(message, summary)
+
+    if payload.get("is_complete") is not True:
+        fail("AIPerf marked the profile incomplete")
+    if completed != expected or requested != expected:
+        fail(
+            f"AIPerf completion mismatch: expected={expected}, "
+            f"completed={completed}, requested={requested}"
+        )
+    if len(rows) != expected:
+        fail(f"expected {expected} profiling rows, observed {len(rows)}")
+    if successful_rows != int(requested):
+        fail(
+            "AIPerf successful-row mismatch: "
+            f"summary={int(requested)}, rows={successful_rows}"
+        )
+    if error_rate != 0:
+        fail(f"AIPerf request_error_rate={error_rate}")
+    if error_summary not in (None, {}, [], ""):
+        fail(f"AIPerf error_summary is non-empty: {error_summary!r}")
+    if "osl_mismatch_count" in payload:
+        if _metric_avg(payload, "osl_mismatch_count") != 0:
+            fail("AIPerf reported output-length mismatches")
+
+    summary["is_complete"] = True
+    summary["strict_completion"] = True
+    return summary
 
 
 def run_aiperf(

@@ -22,11 +22,13 @@ from .constants import (
     LOCAL_ROOT,
     MODEL_NAME,
     MODEL_PATH,
+    OBSERVABILITY_NAMESPACE,
     REPOSITORY_ROOT,
     SERVING_NAMESPACE,
     SYSTEM_NAMESPACE,
 )
 from .manifests import (
+    render_grafana_dashboard,
     render_operator_values,
     render_resources,
     write_json_documents,
@@ -236,6 +238,32 @@ class Kubernetes:
         if missing:
             raise RuntimeError("missing required tools: " + ", ".join(missing))
 
+    def _wait_for_nodes(
+        self,
+        *,
+        timeout: float = 120,
+        interval: float = 2,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + timeout
+        last_error = ""
+        while time.monotonic() < deadline:
+            result = self.kubectl("get", "nodes", "-o", "json", check=False)
+            if result.returncode == 0:
+                try:
+                    payload = json.loads(result.stdout)
+                except json.JSONDecodeError as error:
+                    last_error = str(error)
+                else:
+                    if payload.get("items"):
+                        return payload
+                    last_error = "the API returned no nodes"
+            else:
+                last_error = result.stderr.strip() or result.stdout.strip()
+            time.sleep(interval)
+        raise RuntimeError(
+            "kind API did not expose its nodes after restart: " + last_error
+        )
+
     def start_cluster(self) -> None:
         self.require_apple_silicon()
         self.require_tools()
@@ -296,7 +324,7 @@ class Kubernetes:
                 "refusing to manage an unexpected cluster: "
                 f"context={context!r}, endpoint={endpoint!r}"
             )
-        nodes = json.loads(self.kubectl("get", "nodes", "-o", "json").stdout)
+        nodes = self._wait_for_nodes()
         workers = [
             item["metadata"]["name"]
             for item in nodes["items"]
@@ -368,13 +396,75 @@ class Kubernetes:
         )
 
     def install_observability(self) -> None:
-        for name in ("otel-collector.yaml", "prometheus.yaml"):
+        self.kubectl(
+            "apply",
+            "-f",
+            "-",
+            input_text=json.dumps(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Namespace",
+                    "metadata": {"name": OBSERVABILITY_NAMESPACE},
+                }
+            ),
+        )
+        self.kubectl(
+            "apply",
+            "-f",
+            os.fspath(REPOSITORY_ROOT / "config" / "nats-exporter.yaml"),
+        )
+        for name in (
+            "tempo.yaml",
+            "loki.yaml",
+            "otel-collector.yaml",
+            "prometheus.yaml",
+        ):
             self.kubectl(
                 "apply",
                 "-f",
                 os.fspath(REPOSITORY_ROOT / "config" / name),
             )
-        for deployment in ("otel-collector", "prometheus"):
+        dashboard_manifest = LOCAL_ROOT / "grafana-dashboard-configmap.json"
+        write_json_documents(
+            [render_grafana_dashboard()],
+            dashboard_manifest,
+        )
+        self.kubectl(
+            "apply",
+            "--server-side",
+            "--force-conflicts",
+            "-f",
+            os.fspath(dashboard_manifest),
+        )
+        self.kubectl(
+            "apply",
+            "-f",
+            os.fspath(REPOSITORY_ROOT / "config" / "grafana.yaml"),
+        )
+        self.kubectl(
+            "-n",
+            SYSTEM_NAMESPACE,
+            "rollout",
+            "restart",
+            "deployment/nats-exporter",
+        )
+        self.kubectl(
+            "-n",
+            SYSTEM_NAMESPACE,
+            "rollout",
+            "status",
+            "deployment/nats-exporter",
+            "--timeout=5m",
+        )
+        deployments = ("tempo", "loki", "otel-collector", "prometheus", "grafana")
+        for deployment in deployments:
+            self.kubectl(
+                "-n",
+                "observability",
+                "rollout",
+                "restart",
+                f"deployment/{deployment}",
+            )
             self.kubectl(
                 "-n",
                 "observability",
@@ -518,6 +608,17 @@ class Kubernetes:
             ).stdout,
             self.kubectl(
                 "-n", "observability", "get", "pods", "-o", "wide", check=False
+            ).stdout,
+            self.kubectl(
+                "-n",
+                SYSTEM_NAMESPACE,
+                "get",
+                "pods",
+                "-l",
+                "app=nats-exporter",
+                "-o",
+                "wide",
+                check=False,
             ).stdout,
         ]
         return "\n".join(part.rstrip() for part in parts if part.strip()) + "\n"

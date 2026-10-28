@@ -49,12 +49,43 @@ class RemoteRunner:
 
 
 class SourceTests(unittest.TestCase):
-    def test_defaults_are_sibling_checkouts(self) -> None:
+    def test_default_dynamo_is_prebuilt_vanilla(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             dynamo, fake_sglang = selected_source_specs()
-        self.assertEqual(dynamo.local_path.name, "dynamo")
-        self.assertEqual(fake_sglang.local_path.name, "fake-sglang")
-        self.assertEqual(dynamo.local_path.parent, fake_sglang.local_path.parent)
+        self.assertTrue(dynamo.prebuilt)
+        self.assertIsNone(dynamo.local_path)
+        self.assertEqual(
+            dynamo.remote_url, "https://github.com/ai-dynamo/dynamo.git"
+        )
+        self.assertEqual(dynamo.ref, "v1.6.0")
+        self.assertFalse(fake_sglang.prebuilt)
+        self.assertIsNone(fake_sglang.local_path)
+        self.assertEqual(
+            fake_sglang.remote_url,
+            "https://github.com/karannparikh/fake-sglang.git",
+        )
+        self.assertEqual(fake_sglang.ref, "main")
+
+    def test_explicit_local_fake_sglang_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(
+                os.environ,
+                {"FAKE_SGLANG_SOURCE": directory},
+                clear=True,
+            ):
+                _, fake_sglang = selected_source_specs()
+        self.assertEqual(fake_sglang.local_path, Path(directory).resolve())
+
+    def test_explicit_local_dynamo_builds_from_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(
+                os.environ,
+                {"DYNAMO_SOURCE": directory},
+                clear=True,
+            ):
+                dynamo, _ = selected_source_specs()
+        self.assertFalse(dynamo.prebuilt)
+        self.assertEqual(dynamo.local_path, Path(directory).resolve())
 
     def test_environment_overrides_are_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

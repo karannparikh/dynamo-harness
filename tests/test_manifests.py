@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
+from pathlib import Path
 
 from dynamo_routing_harness.constants import H200_PROFILE
-from dynamo_routing_harness.manifests import render_resources
+from dynamo_routing_harness.manifests import (
+    render_grafana_dashboard,
+    render_resources,
+)
 from dynamo_routing_harness.source import SourceMetadata, SourcePair
 
 
@@ -62,11 +67,77 @@ class ManifestTests(unittest.TestCase):
             H200_PROFILE["token_slots_per_rank"],
         )
 
-    def test_frontend_uses_requested_cli_mode(self) -> None:
-        for mode in ("kv", "load-aware", "power-of-two"):
-            frontend = self._dgd(mode)["spec"]["components"][0]
-            args = frontend["podTemplate"]["spec"]["containers"][0]["args"]
-            self.assertEqual(args[args.index("--router-mode") + 1], mode)
+    def test_frontend_uses_requested_routing_contract(self) -> None:
+        expected = {
+            "kv": ("kv", "--router-kv-events"),
+            "load-aware": ("kv", "--load-aware"),
+            "power-of-two": ("power-of-two", None),
+        }
+        for mode, (router_mode, mode_flag) in expected.items():
+            components = self._dgd(mode)["spec"]["components"]
+            for component in components:
+                if component["type"] not in ("frontend", "prefill", "decode"):
+                    continue
+                args = component["podTemplate"]["spec"]["containers"][0]["args"]
+                self.assertEqual(
+                    args[args.index("--router-mode") + 1],
+                    router_mode,
+                    component["type"],
+                )
+                for flag in ("--router-kv-events", "--load-aware"):
+                    self.assertEqual(
+                        flag in args,
+                        flag == mode_flag,
+                        component["type"],
+                    )
+
+    def test_grafana_dashboard_configmap_is_rendered(self) -> None:
+        configmap = render_grafana_dashboard()
+        self.assertEqual(configmap["metadata"]["namespace"], "observability")
+        dashboard = configmap["data"]["dynamo-lab.json"]
+        self.assertIn('"uid":"dynamo-local-sglang"', dashboard)
+        self.assertIn("simulated_prefix_cache_hit_tokens_total", dashboard)
+        self.assertIn("dynamo_component_router_kv_hit_rate_sum", dashboard)
+
+    def test_grafana_dashboard_matches_dynamo_sim(self) -> None:
+        dashboard = (
+            Path(__file__).resolve().parents[1] / "config" / "grafana-dashboard.json"
+        )
+        digest = hashlib.sha256(dashboard.read_bytes()).hexdigest()
+        self.assertEqual(
+            digest,
+            "4094805e0583ec445ade5070152ba2b9fd5be758c4c6c9d327881715185d5a58",
+        )
+
+    def test_prometheus_aliases_dynamo_16_metrics_for_dashboard(self) -> None:
+        config = (
+            Path(__file__).resolve().parents[1] / "config" / "prometheus.yaml"
+        ).read_text()
+        for metric in (
+            "dynamo_frontend_output_tokens_total",
+            "dynamo_frontend_time_to_first_token_seconds_bucket",
+            "dynamo_frontend_inter_token_latency_seconds_bucket",
+            "dynamo_frontend_active_requests",
+            "dynamo_frontend_queued_requests",
+        ):
+            self.assertIn(f"record: {metric}", config)
+        self.assertNotIn("record: dynamo_frontend_requests_total", config)
+
+    def test_otel_collector_bounds_churned_metric_memory(self) -> None:
+        config = (
+            Path(__file__).resolve().parents[1] / "config" / "otel-collector.yaml"
+        ).read_text()
+        self.assertIn("limit_mib: 1536", config)
+        self.assertIn("metric_expiration: 5m", config)
+        self.assertIn('limits: {cpu: "1", memory: 2Gi}', config)
+
+    def test_tempo_bounds_wal_blocks_with_sufficient_memory(self) -> None:
+        config = (
+            Path(__file__).resolve().parents[1] / "config" / "tempo.yaml"
+        ).read_text()
+        self.assertIn("max_block_duration: 5m", config)
+        self.assertIn("max_block_bytes: 100000000", config)
+        self.assertIn("limits: {cpu: 500m, memory: 2Gi}", config)
 
     def test_source_commits_are_annotated(self) -> None:
         annotations = self._dgd()["metadata"]["annotations"]

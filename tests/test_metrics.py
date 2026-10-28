@@ -8,6 +8,7 @@ from dynamo_routing_harness.metrics import (
     CacheSnapshot,
     HIT_METRIC,
     QUERY_METRIC,
+    _promql_regex_string,
     cache_delta,
     read_cache_snapshot,
     validate_cache_snapshot,
@@ -36,6 +37,11 @@ def series(fleet):
 
 
 class MetricsTests(unittest.TestCase):
+    def test_promql_regex_string_escapes_for_prometheus(self) -> None:
+        pattern = _promql_regex_string(["prefill-a", "prefill.b"])
+        self.assertEqual(pattern, r"prefill-a|prefill\\.b")
+        self.assertNotIn(r"\-", pattern)
+
     def test_complete_snapshot_has_40_ranks(self) -> None:
         fleet = parse_fleet(complete_payload())
         with patch(

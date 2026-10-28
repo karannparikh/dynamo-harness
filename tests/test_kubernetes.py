@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import unittest
+from types import SimpleNamespace
 
 from dynamo_routing_harness.kubernetes import (
     FleetValidationError,
+    Kubernetes,
     parse_fleet,
     validate_fleet,
 )
@@ -47,6 +50,53 @@ def complete_payload():
 
 
 class KubernetesTests(unittest.TestCase):
+    def test_observability_namespace_is_applied_before_resources(self) -> None:
+        class RecordingRunner:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def run(self, args, **kwargs):
+                self.calls.append((tuple(args), kwargs))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        runner = RecordingRunner()
+        Kubernetes(runner=runner).install_observability()
+        args, kwargs = runner.calls[0]
+        self.assertEqual(args, ("kubectl", "apply", "-f", "-"))
+        namespace = json.loads(kwargs["input_text"])
+        self.assertEqual(namespace["metadata"]["name"], "observability")
+
+    def test_wait_for_nodes_retries_api_bootstrap_failure(self) -> None:
+        class SequenceRunner:
+            def __init__(self) -> None:
+                self.results = iter(
+                    (
+                        SimpleNamespace(
+                            returncode=1,
+                            stdout="",
+                            stderr='nodes is forbidden: User "kubernetes-admin"',
+                        ),
+                        SimpleNamespace(
+                            returncode=0,
+                            stdout='{"items":[{"metadata":{"name":"worker"}}]}',
+                            stderr="",
+                        ),
+                    )
+                )
+                self.calls = 0
+
+            def run(self, args, **kwargs):
+                self.calls += 1
+                return next(self.results)
+
+        runner = SequenceRunner()
+        nodes = Kubernetes(runner=runner)._wait_for_nodes(
+            timeout=1,
+            interval=0,
+        )
+        self.assertEqual(nodes["items"][0]["metadata"]["name"], "worker")
+        self.assertEqual(runner.calls, 2)
+
     def test_complete_fleet_validates(self) -> None:
         snapshot = parse_fleet(complete_payload())
         validate_fleet(snapshot)

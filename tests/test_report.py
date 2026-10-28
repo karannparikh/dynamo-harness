@@ -58,6 +58,28 @@ class ReportTests(unittest.TestCase):
         self.assertIn("50.00%", markdown)
         self.assertIn("power-of-two", markdown)
 
+    def test_failed_request_count_is_rendered(self) -> None:
+        summary = {
+            "sources": {
+                "dynamo": {"head": "d", "dirty": False, "path": "/d"},
+                "fake_sglang": {"head": "f", "dirty": False, "path": "/f"},
+            },
+            "offered_rps": 20,
+            "cases": [
+                {
+                    "workload": "toolagent",
+                    "routing_label": "load-aware",
+                    "successful": 21766,
+                    "failed": 1842,
+                    "fleet_stable": False,
+                }
+            ],
+        }
+        from dynamo_routing_harness.report import build_markdown
+
+        markdown = build_markdown(summary)
+        self.assertIn("| toolagent | load-aware | 21766 | 1842 |", markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

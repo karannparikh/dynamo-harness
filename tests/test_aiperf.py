@@ -25,10 +25,18 @@ class AIPerfTests(unittest.TestCase):
         (root / "profile_export_aiperf.json").write_text(json.dumps(payload))
         rows = [
             {
-                "request_start_ns": index * 1_000_000_000,
-                "first_token_ns": index * 1_000_000_000 + 10_000_000,
-                "request_end_ns": index * 1_000_000_000 + 20_000_000,
-                "error": None,
+                "metadata": {
+                    "request_start_ns": index * 1_000_000_000,
+                    "request_end_ns": index * 1_000_000_000 + 20_000_000,
+                    "was_cancelled": False,
+                    "context_overflow_skip": False,
+                },
+                "metrics": {
+                    "time_to_first_token": {
+                        "value": 10,
+                        "unit": "ms",
+                    }
+                },
             }
             for index in range(count)
         ]
@@ -49,6 +57,33 @@ class AIPerfTests(unittest.TestCase):
             artifacts = self._artifacts(Path(directory), 1)
             with self.assertRaisesRegex(AIPerfValidationError, "mismatch"):
                 validate_outputs(artifacts, 2)
+
+    def test_request_errors_preserve_partial_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifacts = self._artifacts(Path(directory), 2)
+            summary_path = artifacts / "profile_export_aiperf.json"
+            payload = json.loads(summary_path.read_text())
+            payload["request_count"]["avg"] = 1
+            payload["request_error_rate"]["avg"] = 50
+            payload["error_summary"] = [{"count": 1, "type": "TimeoutError"}]
+            summary_path.write_text(json.dumps(payload))
+            rows_path = artifacts / "profile_export.jsonl"
+            rows = [
+                json.loads(line)
+                for line in rows_path.read_text().splitlines()
+            ]
+            rows[1]["metrics"] = {}
+            rows[1]["error"] = {"type": "TimeoutError"}
+            rows_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows)
+            )
+            with self.assertRaises(AIPerfValidationError) as caught:
+                validate_outputs(artifacts, 2)
+        self.assertIsNotNone(caught.exception.summary)
+        assert caught.exception.summary is not None
+        self.assertEqual(caught.exception.summary["successful"], 1)
+        self.assertEqual(caught.exception.summary["failed"], 1)
+        self.assertEqual(caught.exception.summary["error_rate_pct"], 50)
 
     def test_command_uses_power_independent_trace_contract(self) -> None:
         command = aiperf_command(

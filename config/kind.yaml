@@ -10,6 +10,10 @@ nodes:
         hostPort: 8000
         listenAddress: "127.0.0.1"
         protocol: TCP
+      - containerPort: 30300
+        hostPort: 3000
+        listenAddress: "127.0.0.1"
+        protocol: TCP
   - role: worker
     labels:
       dynamo-sim.local/gpu-capacity: simulated

@@ -78,7 +78,9 @@ def build_markdown(summary: dict[str, Any]) -> str:
         ]
     )
     for case in summary["cases"]:
-        errors = len(case.get("errors", {}))
+        errors = case.get("failed")
+        if errors is None:
+            errors = len(case.get("errors", {}))
         hit_fraction = _value(case, "prefill_cache", "token_hit_fraction")
         hit = "n/a" if hit_fraction is None else f"{100 * float(hit_fraction):.2f}%"
         lines.append(

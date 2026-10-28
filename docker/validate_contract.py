@@ -21,10 +21,6 @@ ALIASES = {
     "tokens_per_page": ("page_size", "tokens_per_page"),
     "context_length": ("context_length", "max_model_len"),
     "kv_cache_dtype": ("kv_cache_dtype",),
-    "max_running_requests_per_rank": (
-        "max_running_requests",
-        "max_num_running_requests",
-    ),
 }
 
 
@@ -42,6 +38,11 @@ def _server_args() -> Any:
     signature = inspect.signature(server_args)
     kwargs: dict[str, object] = {}
     for name, parameter in signature.parameters.items():
+        if parameter.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            continue
         if parameter.default is not inspect.Parameter.empty:
             continue
         if name in {"model_path", "model"}:
@@ -63,6 +64,19 @@ def _read_value(instance: Any, names: tuple[str, ...]) -> Any:
     raise RuntimeError(f"effective fake-sglang profile is missing {names!r}")
 
 
+def _effective_max_running_requests(server_args: Any) -> int:
+    """Per-rank concurrent-decode cap as fake-sglang actually resolves it.
+
+    ``ServerArgs.max_running_requests`` is a per-process total that defaults to
+    ``None``; the engine derives the per-rank value in
+    ``fakeengine.config.SimConfig.from_server_args`` (``None`` -> 32). Read that
+    effective value instead of the raw attribute.
+    """
+    module = importlib.import_module("fakeengine.config")
+    sim_config = getattr(module, "SimConfig")
+    return int(sim_config.from_server_args(server_args).max_running_requests)
+
+
 def validate() -> dict[str, object]:
     instance = _server_args()
     observed = {
@@ -70,6 +84,9 @@ def validate() -> dict[str, object]:
     }
     observed["token_slots_per_rank"] = (
         int(observed["kv_blocks_per_rank"]) * int(observed["tokens_per_page"])
+    )
+    observed["max_running_requests_per_rank"] = _effective_max_running_requests(
+        instance
     )
     failures = {
         field: {"expected": expected, "observed": observed.get(field)}
