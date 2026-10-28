@@ -120,6 +120,14 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("metric_expiration: 5m", config)
         self.assertIn('limits: {cpu: "1", memory: 2Gi}', config)
 
+    def test_tempo_bounds_wal_blocks_with_sufficient_memory(self) -> None:
+        config = (
+            Path(__file__).resolve().parents[1] / "config" / "tempo.yaml"
+        ).read_text()
+        self.assertIn("max_block_duration: 5m", config)
+        self.assertIn("max_block_bytes: 100000000", config)
+        self.assertIn("limits: {cpu: 500m, memory: 2Gi}", config)
+
     def test_source_commits_are_annotated(self) -> None:
         annotations = self._dgd()["metadata"]["annotations"]
         self.assertEqual(annotations["dynamo-sim.local/dynamo-commit"], "d" * 40)

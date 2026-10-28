@@ -15,6 +15,9 @@ data:
               endpoint: 0.0.0.0:4317
             http:
               endpoint: 0.0.0.0:4318
+    ingester:
+      max_block_duration: 5m
+      max_block_bytes: 100000000
     storage:
       trace:
         backend: local
@@ -58,8 +61,8 @@ spec:
             - {name: config, mountPath: /etc/tempo}
             - {name: data, mountPath: /var/tempo}
           resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {cpu: 500m, memory: 512Mi}
+            requests: {cpu: 50m, memory: 512Mi}
+            limits: {cpu: 500m, memory: 2Gi}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
