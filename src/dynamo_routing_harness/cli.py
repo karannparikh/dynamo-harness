@@ -13,12 +13,13 @@ from .constants import (
     DEFAULT_KUBECONFIG,
     DEFAULT_REQUEST_RATE,
     LOCAL_ROOT,
+    replica_counts,
 )
 from .kubernetes import Kubernetes, validate_fleet
 from .manifests import render_resources, write_json_documents
 from .report import generate_report
 from .source import inspect_sources, write_source_record
-from .traces import ensure_traces
+from .traces import ensure_traces, write_multiturn_trace
 
 
 def _default_trace_dir() -> Path:
@@ -65,6 +66,13 @@ def parser() -> argparse.ArgumentParser:
         choices=("kv", "load-aware", "power-of-two"),
         default="kv",
     )
+    deploy.add_argument("--enable-kv-return", action="store_true")
+    deploy.add_argument("--frontend-replicas", type=int, default=1)
+    deploy.add_argument(
+        "--router-replica-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     setup = commands.add_parser("benchmark-setup")
     setup.add_argument("trace_dir", nargs="?", type=Path, default=_default_trace_dir())
     benchmark = commands.add_parser("benchmark")
@@ -75,15 +83,75 @@ def parser() -> argparse.ArgumentParser:
         default=DEFAULT_REQUEST_RATE,
     )
     benchmark.add_argument(
+        "--output-token-limit",
+        type=int,
+        help=(
+            "cap each Mooncake trace row's output_length without increasing "
+            "shorter requests"
+        ),
+    )
+    benchmark.add_argument(
+        "--workload",
+        action="append",
+        choices=("conversation", "toolagent"),
+        dest="workloads",
+    )
+    benchmark.add_argument(
+        "--routing-mode",
+        action="append",
+        choices=("kv", "load-aware", "power-of-two"),
+        dest="routing_modes",
+    )
+    benchmark.add_argument(
+        "--kv-return",
+        choices=("off", "on", "both"),
+        default="off",
+    )
+    benchmark.add_argument(
         "--trace-dir",
         type=Path,
         default=_default_trace_dir(),
     )
     benchmark.add_argument("--aiperf", type=Path, default=_default_aiperf())
+    benchmark.add_argument("--frontend-replicas", type=int, default=1)
+    benchmark.add_argument(
+        "--router-replica-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    multiturn = commands.add_parser("benchmark-multiturn")
+    multiturn.add_argument("--output", type=Path, required=True)
+    multiturn.add_argument(
+        "--request-rate",
+        type=float,
+        default=DEFAULT_REQUEST_RATE,
+    )
+    multiturn.add_argument("--sessions", type=int, default=1500)
+    multiturn.add_argument("--turns", type=int, default=8)
+    multiturn.add_argument("--input-tokens", type=int, default=256)
+    multiturn.add_argument("--output-tokens", type=int, default=256)
+    multiturn.add_argument(
+        "--kv-return",
+        choices=("off", "on", "both"),
+        default="both",
+    )
+    multiturn.add_argument("--aiperf", type=Path, default=_default_aiperf())
+    multiturn.add_argument("--frontend-replicas", type=int, default=1)
+    multiturn.add_argument(
+        "--router-replica-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     report = commands.add_parser("report")
     report.add_argument("--output", type=Path, required=True)
     render = commands.add_parser("render")
     render.add_argument("--output", type=Path, required=True)
+    render.add_argument("--frontend-replicas", type=int, default=1)
+    render.add_argument(
+        "--router-replica-sync",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     commands.add_parser("status")
     commands.add_parser("stop")
     return root
@@ -142,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
                     images.planner,
                     sources,
                     routing_mode,
+                    frontend_replicas=args.frontend_replicas,
+                    router_replica_sync=args.router_replica_sync,
                 ),
                 args.output / f"dgd-{routing_mode}.json",
             )
@@ -172,13 +242,22 @@ def main(argv: list[str] | None = None) -> int:
             images.planner,
             sources,
             args.routing_mode,
+            args.enable_kv_return,
+            frontend_replicas=args.frontend_replicas,
+            router_replica_sync=args.router_replica_sync,
         )
         kubernetes.wait_graph()
-        fleet = kubernetes.wait_fleet()
-        validate_fleet(fleet)
+        replicas = replica_counts(args.frontend_replicas)
+        fleet = kubernetes.wait_fleet(expected_replicas=replicas)
+        validate_fleet(fleet, replicas)
         kubernetes.validate_profile_contract(fleet)
         return 0
     if args.command == "benchmark":
+        kv_return_modes = {
+            "off": (False,),
+            "on": (True,),
+            "both": (False, True),
+        }[args.kv_return]
         report = run_matrix(
             kubernetes,
             sources,
@@ -187,6 +266,48 @@ def main(argv: list[str] | None = None) -> int:
             args.trace_dir,
             args.aiperf,
             args.request_rate,
+            args.output_token_limit,
+            tuple(dict.fromkeys(args.workloads or ("conversation", "toolagent"))),
+            tuple(
+                dict.fromkeys(
+                    args.routing_modes or ("kv", "load-aware", "power-of-two")
+                )
+            ),
+            kv_return_modes,
+            frontend_replicas=args.frontend_replicas,
+            router_replica_sync=args.router_replica_sync,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.command == "benchmark-multiturn":
+        trace_dir = args.output / "source-traces"
+        write_multiturn_trace(
+            trace_dir,
+            sessions=args.sessions,
+            turns=args.turns,
+            input_tokens=args.input_tokens,
+            output_tokens=args.output_tokens,
+        )
+        kv_return_modes = {
+            "off": (False,),
+            "on": (True,),
+            "both": (False, True),
+        }[args.kv_return]
+        report = run_matrix(
+            kubernetes,
+            sources,
+            images,
+            args.output,
+            trace_dir,
+            args.aiperf,
+            args.request_rate,
+            args.output_tokens,
+            ("multiturn",),
+            ("kv",),
+            kv_return_modes,
+            264,
+            args.frontend_replicas,
+            args.router_replica_sync,
         )
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0

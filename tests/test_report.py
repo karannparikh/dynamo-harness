@@ -32,8 +32,24 @@ class ReportTests(unittest.TestCase):
                 "runtime_image": "local/image:test",
                 "planner_image": "local/planner:test",
                 "sources": sources,
+                "router_replica_sync": False,
+                "output_token_limit": 1024,
+                "trace_evidence": {
+                    workload: {
+                        "records": 3,
+                        "sessions": 3,
+                        "turns_per_session": {"min": 1, "max": 1, "mean": 1},
+                        "input_tokens": {"min": 1, "max": 1},
+                        "capped_records": 1,
+                        "original_output_tokens": {"min": 1, "max": 2000},
+                        "effective_output_tokens": {"min": 1, "max": 1024},
+                        "effective_sha256": workload,
+                    }
+                    for workload in ("conversation", "toolagent")
+                },
                 "cases_finished": True,
                 "comparison_complete": True,
+                "expected_cases": expected_cases(),
             }
             (output / "matrix.json").write_text(json.dumps(matrix))
             for case in expected_cases():
@@ -57,6 +73,13 @@ class ReportTests(unittest.TestCase):
         self.assertIn("`" + "d" * 40 + "`", markdown)
         self.assertIn("50.00%", markdown)
         self.assertIn("power-of-two", markdown)
+        self.assertIn("Requested output-token cap: `1024`", markdown)
+        self.assertIn("Router replica synchronization: `disabled`", markdown)
+        self.assertIn(
+            "| conversation | 3 | 3 | 1.00 (1-1) | 1-1 | 1 | 2000 | 1024 |",
+            markdown,
+        )
+        self.assertIn("| conversation | KV-aware | off |", markdown)
 
     def test_failed_request_count_is_rendered(self) -> None:
         summary = {
@@ -78,7 +101,11 @@ class ReportTests(unittest.TestCase):
         from dynamo_routing_harness.report import build_markdown
 
         markdown = build_markdown(summary)
-        self.assertIn("| toolagent | load-aware | 21766 | 1842 |", markdown)
+        self.assertIn(
+            "| toolagent | load-aware | off | n/a | n/a | n/a | n/a | n/a | "
+            "21766 | 1842 |",
+            markdown,
+        )
 
 
 if __name__ == "__main__":

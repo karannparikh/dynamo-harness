@@ -64,6 +64,7 @@ ROUTING_MODES = {
     "power-of-two": "PO2C",
 }
 WORKLOADS = ("conversation", "toolagent")
+SUPPORTED_WORKLOADS = (*WORKLOADS, "multiturn")
 
 # Mooncake FAST'25 traces (kvcache-ai/Mooncake), pinned for byte-reproducible,
 # hash-verified downloads. AIPerf consumes these as a custom `mooncake_trace`
@@ -112,11 +113,22 @@ def expected_cases() -> list[dict[str, str]]:
     ]
 
 
-def topology() -> dict[str, int]:
+def replica_counts(
+    frontend_processes: int = EXPECTED_REPLICAS["frontend"],
+) -> dict[str, int]:
+    if frontend_processes <= 0:
+        raise ValueError("frontend processes must be positive")
+    return {**EXPECTED_REPLICAS, "frontend": frontend_processes}
+
+
+def topology(
+    frontend_processes: int = EXPECTED_REPLICAS["frontend"],
+) -> dict[str, int]:
+    replicas = replica_counts(frontend_processes)
     return {
-        "frontend_processes": EXPECTED_REPLICAS["frontend"],
-        "planner_processes": EXPECTED_REPLICAS["planner"],
-        "prefill_processes": EXPECTED_REPLICAS["prefill"],
-        "decode_processes": EXPECTED_REPLICAS["decode"],
+        "frontend_processes": replicas["frontend"],
+        "planner_processes": replicas["planner"],
+        "prefill_processes": replicas["prefill"],
+        "decode_processes": replicas["decode"],
         "ranks_per_worker_process": RANKS_PER_PROCESS,
     }

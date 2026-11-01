@@ -22,7 +22,14 @@ def sources() -> SourcePair:
 
 
 class ManifestTests(unittest.TestCase):
-    def _dgd(self, mode: str = "kv") -> dict[str, object]:
+    def _dgd(
+        self,
+        mode: str = "kv",
+        enable_kv_return: bool = False,
+        fake_output_token_id: int | None = None,
+        frontend_replicas: int = 1,
+        router_replica_sync: bool = False,
+    ) -> dict[str, object]:
         return next(
             resource
             for resource in render_resources(
@@ -30,9 +37,34 @@ class ManifestTests(unittest.TestCase):
                 "local/planner:test",
                 sources(),
                 mode,
+                enable_kv_return,
+                fake_output_token_id,
+                frontend_replicas,
+                router_replica_sync,
             )
             if resource["kind"] == "DynamoGraphDeployment"
         )
+
+    def test_kv_return_is_enabled_on_both_worker_tiers(self) -> None:
+        components = self._dgd("kv", enable_kv_return=True)["spec"]["components"]
+        for component in components:
+            args = component["podTemplate"]["spec"]["containers"][0]["args"]
+            self.assertEqual(
+                "--enable-kv-return" in args,
+                component["type"] in {"prefill", "decode"},
+            )
+
+    def test_fixed_output_token_is_enabled_on_both_worker_tiers(self) -> None:
+        components = self._dgd(fake_output_token_id=264)["spec"]["components"]
+        for component in components:
+            args = component["podTemplate"]["spec"]["containers"][0]["args"]
+            if component["type"] in {"prefill", "decode"}:
+                self.assertEqual(
+                    args[args.index("--fake-output-token-id") + 1],
+                    "264",
+                )
+            else:
+                self.assertNotIn("--fake-output-token-id", args)
 
     def test_validated_topology(self) -> None:
         components = self._dgd()["spec"]["components"]
@@ -43,6 +75,28 @@ class ManifestTests(unittest.TestCase):
             observed,
             {"frontend": 1, "planner": 1, "prefill": 4, "decode": 4},
         )
+
+    def test_multiple_frontends_explicitly_disable_replica_sync(self) -> None:
+        components = self._dgd(frontend_replicas=4)["spec"]["components"]
+        frontend = next(
+            component for component in components if component["type"] == "frontend"
+        )
+        self.assertEqual(frontend["replicas"], 4)
+        args = frontend["podTemplate"]["spec"]["containers"][0]["args"]
+        self.assertIn("--no-router-replica-sync", args)
+        self.assertNotIn("--router-replica-sync", args)
+
+    def test_router_replica_sync_can_be_enabled(self) -> None:
+        components = self._dgd(
+            frontend_replicas=4,
+            router_replica_sync=True,
+        )["spec"]["components"]
+        frontend = next(
+            component for component in components if component["type"] == "frontend"
+        )
+        args = frontend["podTemplate"]["spec"]["containers"][0]["args"]
+        self.assertIn("--router-replica-sync", args)
+        self.assertNotIn("--no-router-replica-sync", args)
 
     def test_workers_inherit_h200_defaults(self) -> None:
         components = self._dgd()["spec"]["components"]

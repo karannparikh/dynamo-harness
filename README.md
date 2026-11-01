@@ -170,6 +170,30 @@ directory (`.local/mooncake-100rps/`) when they are missing:
 ./bin/lab benchmark --output reports/mooncake
 ```
 
+Run a controlled multi-turn KV-return comparison with 1,500 eight-turn
+sessions, fixed 256-token user messages, fixed 256-token responses, and 20 RPS:
+
+```bash
+./bin/lab benchmark-multiturn \
+  --output reports/multiturn-8x256-kv-return \
+  --sessions 1500 \
+  --turns 8 \
+  --input-tokens 256 \
+  --output-tokens 256 \
+  --request-rate 20 \
+  --kv-return both
+```
+
+The generated Mooncake-format trace groups turns by `session_id`. AIPerf
+captures each live assistant response and includes it in the next request's
+conversation history, so the return-on case measures reusable response KV
+rather than repeated independent prompts.
+
+Use `--frontend-replicas 4 --no-router-replica-sync` on `deploy`, `benchmark`,
+or `benchmark-multiturn` to run four independently tracking Dynamo routers.
+The rendered frontend command explicitly disables best-effort router replica
+synchronization instead of relying on Dynamo's default.
+
 The default offered load is 20 RPS. Override the rate or point at a different
 trace directory without changing the matrix:
 

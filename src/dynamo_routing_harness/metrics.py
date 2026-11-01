@@ -17,6 +17,24 @@ METRIC_FIELDS = {
     QUERY_METRIC: "query_tokens",
     HIT_METRIC: "hit_tokens",
 }
+KV_RETURN_METRIC_FIELDS = {
+    "sglang:simulated_kv_return_attempts_total": "attempts",
+    "sglang:simulated_kv_return_stored_total": "stored",
+    "sglang:simulated_kv_return_rejected_total": "rejected",
+    "sglang:simulated_kv_return_failed_total": "failed",
+    "sglang:simulated_kv_return_tokens_total": "tokens",
+    "sglang:simulated_kv_return_bytes_total": "bytes",
+    "sglang:simulated_kv_return_transfer_seconds_total": "transfer_seconds",
+    "sglang:simulated_kv_return_commit_seconds_total": "commit_seconds",
+}
+KV_RETURN_CORE_FIELDS = {
+    "attempts",
+    "stored",
+    "tokens",
+    "bytes",
+    "transfer_seconds",
+    "commit_seconds",
+}
 
 
 class MetricValidationError(RuntimeError):
@@ -32,6 +50,14 @@ class CacheSnapshot:
 
     def as_dict(self) -> dict[str, object]:
         return {"ranks": self.counters}
+
+
+@dataclass(frozen=True)
+class KVReturnSnapshot:
+    totals: dict[str, float]
+
+    def as_dict(self) -> dict[str, object]:
+        return {"totals": self.totals}
 
 
 def _identity(labels: dict[str, str]) -> str:
@@ -132,6 +158,67 @@ def wait_cache_snapshot(
     raise TimeoutError(f"cache metrics did not become complete: {last_error}")
 
 
+def read_kv_return_snapshot(
+    prometheus_url: str,
+    fleet: FleetSnapshot,
+) -> KVReturnSnapshot:
+    pods = sorted(
+        pod.name
+        for role in ("prefill", "decode")
+        for pod in fleet.by_role(role)
+    )
+    if not pods:
+        raise MetricValidationError("no worker pods are present")
+    pod_pattern = _promql_regex_string(pods)
+    query = (
+        '{__name__=~"sglang:simulated_kv_return_.*",'
+        f'pod=~"{pod_pattern}"'
+        "}"
+    )
+    totals = {field: 0.0 for field in KV_RETURN_METRIC_FIELDS.values()}
+    observed: set[str] = set()
+    for series in _prometheus_query(prometheus_url, query):
+        labels = series.get("metric", {})
+        if not isinstance(labels, dict):
+            continue
+        metric_name = labels.get("__name__")
+        pod = labels.get("pod")
+        if pod not in pods:
+            raise MetricValidationError(
+                f"KV return metric escaped current pod scope: {pod!r}"
+            )
+        field = KV_RETURN_METRIC_FIELDS.get(str(metric_name))
+        if field is None:
+            continue
+        value = series.get("value", [])
+        if not isinstance(value, list) or len(value) != 2:
+            raise MetricValidationError(f"invalid Prometheus value: {value!r}")
+        totals[field] += float(value[1])
+        observed.add(field)
+    missing = KV_RETURN_CORE_FIELDS - observed
+    if missing:
+        raise MetricValidationError(
+            f"KV return metrics are missing core counters: {sorted(missing)}"
+        )
+    return KVReturnSnapshot(totals)
+
+
+def wait_kv_return_snapshot(
+    prometheus_url: str,
+    fleet: FleetSnapshot,
+    timeout: float = METRICS_TIMEOUT_SECONDS,
+) -> KVReturnSnapshot:
+    deadline = time.monotonic() + timeout
+    last_error = "no metrics returned"
+    while time.monotonic() < deadline:
+        try:
+            return read_kv_return_snapshot(prometheus_url, fleet)
+        except (MetricValidationError, OSError, ValueError) as error:
+            last_error = str(error)
+            time.sleep(5)
+    raise TimeoutError(f"KV return metrics did not become complete: {last_error}")
+
+
 def cache_delta(
     before: CacheSnapshot,
     after: CacheSnapshot,
@@ -177,5 +264,24 @@ def cache_delta(
     }
 
 
+def kv_return_delta(
+    before: KVReturnSnapshot,
+    after: KVReturnSnapshot,
+) -> dict[str, float]:
+    delta = {
+        field: after.totals[field] - before.totals[field]
+        for field in before.totals
+    }
+    if any(value < 0 for value in delta.values()):
+        raise MetricValidationError(
+            f"KV return counter reset detected: {delta!r}"
+        )
+    return delta
+
+
 def write_cache_snapshot(snapshot: CacheSnapshot, output: Path) -> None:
+    output.write_text(json.dumps(snapshot.as_dict(), indent=2, sort_keys=True) + "\n")
+
+
+def write_kv_return_snapshot(snapshot: KVReturnSnapshot, output: Path) -> None:
     output.write_text(json.dumps(snapshot.as_dict(), indent=2, sort_keys=True) + "\n")

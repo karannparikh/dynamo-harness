@@ -7,9 +7,12 @@ from pathlib import Path
 
 from dynamo_routing_harness.aiperf import (
     AIPerfValidationError,
+    _aiperf_environment,
     aiperf_command,
+    trace_dataset_entries,
     validate_outputs,
 )
+from dynamo_routing_harness.constants import LOCAL_ROOT
 
 
 class AIPerfTests(unittest.TestCase):
@@ -97,6 +100,45 @@ class AIPerfTests(unittest.TestCase):
         self.assertIn("mooncake_trace", command)
         self.assertIn("--no-fixed-schedule", command)
         self.assertIn("--use-server-token-count", command)
+
+    def test_multi_turn_trace_counts_sessions_as_dataset_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "trace.jsonl"
+            trace.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "session_id": session,
+                            "input_length": 256,
+                            "output_length": 256,
+                        }
+                    )
+                    for session in ("a", "a", "b", "b")
+                )
+                + "\n"
+            )
+            self.assertEqual(trace_dataset_entries(trace), 2)
+
+    def test_multi_turn_command_stops_after_complete_sessions(self) -> None:
+        command = aiperf_command(
+            Path("/aiperf"),
+            Path("/trace.jsonl"),
+            Path("/artifacts"),
+            20,
+            16,
+            2,
+        )
+        self.assertIn("--conversation-num", command)
+        self.assertNotIn("--request-count", command)
+
+    def test_offline_tokenizer_uses_populated_hub_cache(self) -> None:
+        env = _aiperf_environment()
+        self.assertEqual(env["HF_HUB_CACHE"], str(LOCAL_ROOT / "aiperf-hf"))
+        self.assertEqual(
+            env["TRANSFORMERS_CACHE"],
+            str(LOCAL_ROOT / "aiperf-hf"),
+        )
+        self.assertNotEqual(env["HF_HOME"], env["HF_HUB_CACHE"])
 
 
 if __name__ == "__main__":
