@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -146,9 +147,12 @@ def parse_fleet(payload: dict[str, object]) -> FleetSnapshot:
     return FleetSnapshot(tuple(sorted(pods, key=lambda pod: pod.name)))
 
 
-def validate_fleet(snapshot: FleetSnapshot) -> None:
+def validate_fleet(
+    snapshot: FleetSnapshot,
+    expected_replicas: Mapping[str, int] = EXPECTED_REPLICAS,
+) -> None:
     problems: list[str] = []
-    for role, expected in EXPECTED_REPLICAS.items():
+    for role, expected in expected_replicas.items():
         role_pods = snapshot.by_role(role)
         if len(role_pods) != expected:
             problems.append(f"{role}: expected {expected}, observed {len(role_pods)}")
@@ -480,10 +484,41 @@ class Kubernetes:
         planner_image: str,
         sources: SourcePair,
         routing_mode: str = "kv",
+        enable_kv_return: bool = False,
+        fake_output_token_id: int | None = None,
+        frontend_replicas: int = 1,
+        router_replica_sync: bool = False,
     ) -> Path:
-        manifest = LOCAL_ROOT / f"dgd-{routing_mode}.json"
+        return_suffix = "-kv-return" if enable_kv_return else ""
+        token_suffix = (
+            f"-token-{fake_output_token_id}"
+            if fake_output_token_id is not None
+            else ""
+        )
+        frontend_suffix = (
+            f"-frontends-{frontend_replicas}"
+            if frontend_replicas != 1
+            else ""
+        )
+        sync_suffix = "-router-sync" if router_replica_sync else "-no-router-sync"
+        manifest = (
+            LOCAL_ROOT
+            / (
+                f"dgd-{routing_mode}{return_suffix}{token_suffix}"
+                f"{frontend_suffix}{sync_suffix}.json"
+            )
+        )
         write_json_documents(
-            render_resources(image, planner_image, sources, routing_mode),
+            render_resources(
+                image,
+                planner_image,
+                sources,
+                routing_mode,
+                enable_kv_return,
+                fake_output_token_id,
+                frontend_replicas,
+                router_replica_sync,
+            ),
             manifest,
         )
         self.kubectl("apply", "-f", os.fspath(manifest))
@@ -547,13 +582,14 @@ class Kubernetes:
         *,
         old_uids: set[str] | None = None,
         timeout: float = 600,
+        expected_replicas: Mapping[str, int] = EXPECTED_REPLICAS,
     ) -> FleetSnapshot:
         deadline = time.monotonic() + timeout
         last_error = "fleet not observed"
         while time.monotonic() < deadline:
             try:
                 snapshot = self.fleet()
-                validate_fleet(snapshot)
+                validate_fleet(snapshot, expected_replicas)
                 if old_uids and snapshot.uids.intersection(old_uids):
                     raise FleetValidationError(
                         "new fleet reused pod UIDs from the previous case"
@@ -564,7 +600,11 @@ class Kubernetes:
                 time.sleep(5)
         raise TimeoutError(f"fleet did not stabilize: {last_error}")
 
-    def recreate_fleet(self, previous_uids: set[str]) -> FleetSnapshot:
+    def recreate_fleet(
+        self,
+        previous_uids: set[str],
+        expected_replicas: Mapping[str, int] = EXPECTED_REPLICAS,
+    ) -> FleetSnapshot:
         self.kubectl(
             "-n",
             SERVING_NAMESPACE,
@@ -575,7 +615,10 @@ class Kubernetes:
             "--wait=true",
             "--timeout=3m",
         )
-        return self.wait_fleet(old_uids=previous_uids)
+        return self.wait_fleet(
+            old_uids=previous_uids,
+            expected_replicas=expected_replicas,
+        )
 
     def validate_profile_contract(self, snapshot: FleetSnapshot) -> dict[str, object]:
         prefill = snapshot.by_role("prefill")
