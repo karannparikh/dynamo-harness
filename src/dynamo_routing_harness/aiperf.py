@@ -5,11 +5,13 @@ import os
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from .command import Runner
 from .constants import (
+    EXPECTED_REPLICAS,
     FLEET_POLL_SECONDS,
     LOCAL_ROOT,
     MODEL_NAME,
@@ -93,13 +95,55 @@ def trace_request_count(trace: Path) -> int:
     return count
 
 
+def trace_dataset_entries(trace: Path) -> int:
+    identities: set[tuple[str, object]] = set()
+    for line_number, line in enumerate(trace.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        session_id = record.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            identities.add(("session", session_id))
+        else:
+            identities.add(("row", line_number))
+    if not identities:
+        raise AIPerfValidationError(f"trace has no dataset entries: {trace}")
+    return len(identities)
+
+
+def _aiperf_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    cache = LOCAL_ROOT / "aiperf-hf"
+    env.update(
+        {
+            "HF_HOME": os.fspath(LOCAL_ROOT / "aiperf-hf-home"),
+            "HF_HUB_CACHE": os.fspath(cache),
+            "TRANSFORMERS_CACHE": os.fspath(cache),
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+            "PYTHONHASHSEED": "42",
+            "AIPERF_DATASET_CONFIGURATION_TIMEOUT": "900",
+            "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": "960",
+        }
+    )
+    return env
+
+
 def aiperf_command(
     executable: Path,
     trace: Path,
     artifact_dir: Path,
     request_rate: float,
     request_count: int,
+    dataset_entries: int | None = None,
 ) -> tuple[str, ...]:
+    resolved_entries = dataset_entries or request_count
+    stop_condition = (
+        ("--conversation-num", str(resolved_entries))
+        if resolved_entries < request_count
+        else ("--request-count", str(request_count))
+    )
     return (
         "/usr/bin/time",
         "-l",
@@ -121,10 +165,9 @@ def aiperf_command(
         "--custom-dataset-type",
         "mooncake_trace",
         "--no-fixed-schedule",
-        "--request-count",
-        str(request_count),
+        *stop_condition,
         "--num-dataset-entries",
-        str(request_count),
+        str(resolved_entries),
         "--dataset-sampling-strategy",
         "sequential",
         "--request-rate",
@@ -310,8 +353,10 @@ def run_aiperf(
     trace: Path,
     artifact_dir: Path,
     request_rate: float,
+    expected_replicas: Mapping[str, int] = EXPECTED_REPLICAS,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     request_count = trace_request_count(trace)
+    dataset_entries = trace_dataset_entries(trace)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     command = aiperf_command(
         executable,
@@ -319,19 +364,9 @@ def run_aiperf(
         artifact_dir,
         request_rate,
         request_count,
+        dataset_entries,
     )
-    env = os.environ.copy()
-    env.update(
-        {
-            "HF_HOME": os.fspath(LOCAL_ROOT / "aiperf-hf"),
-            "HF_HUB_OFFLINE": "1",
-            "TRANSFORMERS_OFFLINE": "1",
-            "TOKENIZERS_PARALLELISM": "false",
-            "PYTHONHASHSEED": "42",
-            "AIPERF_DATASET_CONFIGURATION_TIMEOUT": "900",
-            "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT": "960",
-        }
-    )
+    env = _aiperf_environment()
     timeout = max(1800.0, 960.0 + request_count / request_rate + 240.0)
     observations: list[dict[str, object]] = []
 
@@ -361,7 +396,7 @@ def run_aiperf(
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"AIPerf exceeded {timeout:.0f} seconds")
                 snapshot = kubernetes.fleet()
-                validate_fleet(snapshot)
+                validate_fleet(snapshot, expected_replicas)
                 stable = snapshot.stable_against(baseline)
                 observations.append(
                     {

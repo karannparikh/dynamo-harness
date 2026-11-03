@@ -7,9 +7,11 @@ from dynamo_routing_harness.kubernetes import parse_fleet
 from dynamo_routing_harness.metrics import (
     CacheSnapshot,
     HIT_METRIC,
+    KVReturnSnapshot,
     QUERY_METRIC,
     _promql_regex_string,
     cache_delta,
+    kv_return_delta,
     read_cache_snapshot,
     validate_cache_snapshot,
 )
@@ -37,6 +39,33 @@ def series(fleet):
 
 
 class MetricsTests(unittest.TestCase):
+    def test_kv_return_counter_delta(self) -> None:
+        before = KVReturnSnapshot(
+            {
+                "attempts": 1,
+                "stored": 1,
+                "rejected": 0,
+                "failed": 0,
+                "tokens": 10,
+                "bytes": 20,
+                "transfer_seconds": 0.1,
+                "commit_seconds": 0.01,
+            }
+        )
+        after = KVReturnSnapshot(
+            {
+                "attempts": 4,
+                "stored": 3,
+                "rejected": 1,
+                "failed": 0,
+                "tokens": 30,
+                "bytes": 60,
+                "transfer_seconds": 0.3,
+                "commit_seconds": 0.03,
+            }
+        )
+        self.assertEqual(kv_return_delta(before, after)["stored"], 2)
+
     def test_promql_regex_string_escapes_for_prometheus(self) -> None:
         pattern = _promql_regex_string(["prefill-a", "prefill.b"])
         self.assertEqual(pattern, r"prefill-a|prefill\\.b")

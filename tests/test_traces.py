@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,9 @@ from dynamo_routing_harness.constants import TRACE_SOURCES
 from dynamo_routing_harness.traces import (
     TraceDownloadError,
     ensure_traces,
+    prepare_benchmark_traces,
     trace_path,
+    write_multiturn_trace,
 )
 
 
@@ -20,6 +23,27 @@ def _sha256(data: bytes) -> str:
 
 
 class TraceTests(unittest.TestCase):
+    def test_writes_deterministic_multiturn_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_multiturn_trace(
+                Path(tmp),
+                sessions=2,
+                turns=3,
+                input_tokens=256,
+                output_tokens=256,
+            )
+            rows = [
+                json.loads(line)
+                for line in path.read_text().splitlines()
+            ]
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(
+            [row["session_id"] for row in rows],
+            ["session-000000"] * 3 + ["session-000001"] * 3,
+        )
+        self.assertTrue(all(row["input_length"] == 256 for row in rows))
+        self.assertTrue(all(row["output_length"] == 256 for row in rows))
+
     def test_downloads_missing_traces_and_verifies(self) -> None:
         payloads = {
             workload: f"{workload}-trace".encode() for workload in TRACE_SOURCES
@@ -101,6 +125,44 @@ class TraceTests(unittest.TestCase):
                     workloads=("unconfigured",),
                     downloader=lambda url: b"",
                 )
+
+    def test_prepares_capped_trace_without_increasing_short_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "source"
+            source_dir.mkdir()
+            source = trace_path(source_dir, "conversation")
+            source.write_text(
+                "\n".join(
+                    json.dumps({"output_length": value, "input_length": 1})
+                    for value in (100, 1024, 2000)
+                )
+                + "\n"
+            )
+            resolved, evidence = prepare_benchmark_traces(
+                source_dir,
+                root / "effective",
+                1024,
+                workloads=("conversation",),
+            )
+            records = [
+                json.loads(line)
+                for line in resolved["conversation"].read_text().splitlines()
+            ]
+        self.assertEqual(
+            [record["output_length"] for record in records],
+            [100, 1024, 1024],
+        )
+        self.assertEqual(evidence["conversation"]["capped_records"], 1)
+        self.assertEqual(
+            evidence["conversation"]["effective_output_tokens"]["max"],
+            1024,
+        )
+        self.assertEqual(evidence["conversation"]["sessions"], 3)
+        self.assertEqual(
+            evidence["conversation"]["turns_per_session"]["max"],
+            1,
+        )
 
 
 if __name__ == "__main__":

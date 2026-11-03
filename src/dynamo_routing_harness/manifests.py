@@ -66,6 +66,8 @@ def _worker_component(
     image: str,
     router_policy_sha: str,
     routing_mode: str,
+    enable_kv_return: bool,
+    fake_output_token_id: int | None,
 ) -> dict[str, object]:
     env: list[dict[str, object]] = _common_env(f"dynamo-{role}")
     env.extend(
@@ -111,6 +113,10 @@ def _worker_component(
         args.append("--router-kv-events")
     elif routing_mode == "load-aware":
         args.append("--load-aware")
+    if enable_kv_return:
+        args.append("--enable-kv-return")
+    if fake_output_token_id is not None:
+        args.extend(["--fake-output-token-id", str(fake_output_token_id)])
     return {
         "name": role,
         "type": role,
@@ -214,7 +220,13 @@ def render_resources(
     planner_image: str,
     sources: SourcePair,
     routing_mode: str = "kv",
+    enable_kv_return: bool = False,
+    fake_output_token_id: int | None = None,
+    frontend_replicas: int = 1,
+    router_replica_sync: bool = False,
 ) -> list[dict[str, object]]:
+    if frontend_replicas <= 0:
+        raise ValueError("frontend replicas must be positive")
     policy = (REPOSITORY_ROOT / "config" / "router-policy.yaml").read_text()
     # Kubernetes label values are capped at 63 characters, so a full 64-char
     # SHA-256 hexdigest is invalid; the first 63 chars are still a stable,
@@ -231,6 +243,11 @@ def render_resources(
         "--router-track-output-blocks",
         "--router-policy-config",
         "/etc/lab-router/router-policy.yaml",
+        (
+            "--router-replica-sync"
+            if router_replica_sync
+            else "--no-router-replica-sync"
+        ),
     ]
     if routing_mode == "kv":
         frontend_args.append("--router-kv-events")
@@ -240,7 +257,7 @@ def render_resources(
         {
             "name": "Frontend",
             "type": "frontend",
-            "replicas": 1,
+            "replicas": frontend_replicas,
             "runtimeVersionOverride": DYNAMO_VERSION,
             "podTemplate": {
                 "metadata": {
@@ -313,8 +330,22 @@ def render_resources(
                 }
             },
         },
-        _worker_component("prefill", image, policy_sha, routing_mode),
-        _worker_component("decode", image, policy_sha, routing_mode),
+        _worker_component(
+            "prefill",
+            image,
+            policy_sha,
+            routing_mode,
+            enable_kv_return,
+            fake_output_token_id,
+        ),
+        _worker_component(
+            "decode",
+            image,
+            policy_sha,
+            routing_mode,
+            enable_kv_return,
+            fake_output_token_id,
+        ),
     ]
     return [
         {
